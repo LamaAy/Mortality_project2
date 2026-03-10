@@ -808,20 +808,66 @@ elif st.session_state.page == 4:
                 # ── A) Semantic search k=15 on FAISS ─────────────────────
                 sem_hits = search_icd(df_icd, fidx, cause_text, top_k=15)
 
-                # ── B) Keyword search on df_icd (metadata.pkl has EmbedText) ──
-                # Use the SAME dataframe the embeddings were built from
+                # DEBUG: show raw FAISS results (remove after fixing)
+                with st.expander("🔍 Debug: FAISS top results for: " + cause_text, expanded=False):
+                    if sem_hits:
+                        for h in sem_hits[:8]:
+                            st.write(f"[{h.get('similarity',0):.3f}] {h.get('code_formatted','')} — {h.get('short_desc','')}")
+                    else:
+                        st.write("No FAISS results returned")
+
+                # ── B) Keyword search on df_icd with synonym expansion ────────
                 kw_hits = []
-                kw_terms = [t for t in sq_lower.split() if len(t) > 3]
-                if kw_terms and df_icd is not None:
+                # Synonym/stem expansion map: query word -> list of variants to search
+                SYNONYMS = {
+                    "atherosclerosis": ["atherosclerosis", "atherosclerotic", "arteriosclerosis"],
+                    "atherosclerotic": ["atherosclerosis", "atherosclerotic"],
+                    "infarction":      ["infarction", "infarct"],
+                    "failure":         ["failure"],
+                    "pneumonia":       ["pneumonia", "pneumonic"],
+                    "hypertension":    ["hypertension", "hypertensive"],
+                    "diabetes":        ["diabetes", "diabetic"],
+                    "mellitus":        ["mellitus"],
+                    "obesity":         ["obesity", "obese"],
+                    "renal":           ["renal", "kidney"],
+                    "hepatic":         ["hepatic", "liver"],
+                    "pulmonary":       ["pulmonary", "lung"],
+                    "coronary":        ["coronary"],
+                    "cerebral":        ["cerebral", "brain"],
+                    "sepsis":          ["sepsis", "septic", "septicemia"],
+                    "stroke":          ["stroke", "cerebrovascular"],
+                }
+                # Specificity boost: if "type 2" in query, require "2" in text too
+                require_terms = []
+                if "type 2" in sq_lower or "type ii" in sq_lower:
+                    require_terms = ["2"]
+                elif "type 1" in sq_lower or "type i" in sq_lower:
+                    require_terms = ["1"]
+
+                raw_terms = [t for t in sq_lower.split() if len(t) > 3]
+                expanded  = []
+                for t in raw_terms:
+                    expanded.extend(SYNONYMS.get(t, [t]))
+                expanded = list(set(expanded))  # deduplicate
+
+                if expanded and df_icd is not None:
                     search_df = df_icd
                     combined = (
-                        search_df.get("ShortDesc", pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower() + " " +
-                        search_df.get("LongDesc",  pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower() + " " +
-                        search_df.get("EmbedText", pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower()
+                        search_df["ShortDesc"].fillna("").str.lower() + " " +
+                        search_df["LongDesc"].fillna("").str.lower() + " " +
+                        search_df["EmbedText"].fillna("").str.lower()
+                        if "EmbedText" in search_df.columns
+                        else search_df["ShortDesc"].fillna("").str.lower() + " " +
+                             search_df["LongDesc"].fillna("").str.lower()
                     )
                     kw_scores = sum(
-                        combined.str.contains(t, regex=False).astype(int) for t in kw_terms
+                        combined.str.contains(t, regex=False).astype(int) for t in expanded
                     )
+                    # Apply require_terms filter (must contain all required terms)
+                    for req in require_terms:
+                        mask = combined.str.contains(req, regex=False)
+                        kw_scores = kw_scores.where(mask, 0)
+
                     top_kw = kw_scores.nlargest(10).index
                     for i in top_kw:
                         if kw_scores.loc[i] > 0:
