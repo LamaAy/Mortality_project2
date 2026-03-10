@@ -1,15 +1,16 @@
 """
+app.py
+
 Saudi MOH - Electronic Death Certificate System
 English UI
-Deterministic ICD-10 coding using:
-- Excel / metadata as source of truth
-- Optional prebuilt FAISS index
-- Optional embeddings
-- BM25 keyword retrieval
-- Reciprocal Rank Fusion (RRF)
-- Rule-based validation
+Hybrid ICD-10 coding:
+1) Claude extracts Part I / Part II causes + intervals
+2) Excel / metadata / retrieval provide candidate rows
+3) Claude selects ONLY from retrieved file candidates
+4) Rule-based validation checks the final certificate
 
-No LLMs are used.
+Source of truth for coding = loaded ICD file rows only.
+Claude is NOT allowed to invent ICD codes.
 """
 
 import streamlit as st
@@ -20,10 +21,13 @@ import datetime
 import os
 import pickle
 import html
+import json
 from typing import List, Dict, Tuple, Optional
 
+import anthropic
+
 # =============================================================================
-# Page Config
+# Page config
 # =============================================================================
 st.set_page_config(
     page_title="Death Certificate | Saudi MOH",
@@ -194,31 +198,37 @@ st.markdown("""
   <div>
     <h1>Electronic Death Certificate System</h1>
     <p>Ministry of Health | Kingdom of Saudi Arabia</p>
-    <p style="font-size:.76rem;opacity:.72">Deterministic ICD-10 Coding | Excel + Metadata + FAISS + BM25</p>
+    <p style="font-size:.76rem;opacity:.72">Claude extraction + file-only ICD coding</p>
   </div>
   <div class="moh-emblem">MOH<br>KSA<br>Death<br>Cert</div>
 </div>
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# Resource IDs
+# Secrets / IDs
 # =============================================================================
+try:
+    API_KEY = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:
+    API_KEY = None
+
 GDRIVE_EMBEDDINGS_ID = "1CxCGihYnqyaIc-F0IJwHNUTpLRHGmy8Y"
 GDRIVE_FAISS_ID      = "17F5rDFoT3iDbRKKiHCMiSB9ZrH0ecVTP"
 GDRIVE_METADATA_ID   = "1nUUdhivH1XIPGXkvWjrapxzuKfbM445B"
 GDRIVE_EXCEL_ID      = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_det_cache_v3")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_hybrid_cache_v1")
 EMBED_MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # =============================================================================
-# Utilities
+# Helpers
 # =============================================================================
 def escape(x) -> str:
     return html.escape("" if x is None else str(x))
 
 def sanitize_filename(s: str) -> str:
-    s = re.sub(r"[^\w\-\.]+", "_", s.strip(), flags=re.UNICODE)
+    s = re.sub(r"[^\w\-\.]+", "_", str(s).strip(), flags=re.UNICODE)
     return s[:120] if s else "certificate"
 
 def normalize_text_basic(text: str) -> str:
@@ -237,10 +247,6 @@ def specificity_score(code: str) -> int:
     if not code:
         return 0
     return len(str(code).strip().upper().replace(".", ""))
-
-def code_chapter_letter(code: str) -> str:
-    c = (code or "").strip().upper()
-    return c[:1] if c else ""
 
 def is_gender_allowed(gender_restriction: str, sex_value: str) -> bool:
     gr = normalize_text_basic(gender_restriction)
@@ -261,8 +267,24 @@ def acceptable_main_bool(x: str) -> Optional[bool]:
         return False
     return None
 
+def query_indicates_external_cause(query: str) -> bool:
+    q = normalize_text_basic(query)
+    triggers = [
+        "accident", "injury", "collision", "fall", "burn", "poisoning", "vehicle",
+        "atv", "road traffic", "assault", "homicide", "suicide", "gunshot", "stab"
+    ]
+    return any(t in q for t in triggers)
+
+def diabetes_type_hint(query: str) -> Optional[str]:
+    q = normalize_text_basic(query)
+    if re.search(r"\b(type\s*2|type\s*ii|non[-\s]?insulin[-\s]?dependent)\b", q):
+        return "type2"
+    if re.search(r"\b(type\s*1|type\s*i|insulin[-\s]?dependent)\b", q):
+        return "type1"
+    return None
+
 # =============================================================================
-# Deterministic dictionaries
+# Query expansions
 # =============================================================================
 LAY_QUERY_EXPANSIONS = {
     "heart attack": ["acute myocardial infarction", "myocardial infarction", "coronary thrombosis"],
@@ -283,10 +305,10 @@ LAY_QUERY_EXPANSIONS = {
     "acute respiratory distress syndrome": ["ards"],
     "peritonitis": ["generalized peritonitis"],
     "diverticulitis": ["sigmoid diverticulitis", "diverticulitis of large intestine"],
-}
-
-AMBIGUOUS_TERMS = {
-    "shock", "failure", "stroke", "cancer", "infection", "sepsis", "respiratory failure"
+    "septic shock": ["septic shock", "sepsis"],
+    "obesity": ["obesity"],
+    "metabolic syndrome": ["metabolic syndrome"],
+    "vasculopathy": ["angiopathy", "vascular disease"],
 }
 
 STOPWORDS = {
@@ -297,190 +319,8 @@ STOPWORDS = {
     "complication", "condition", "lasting", "present", "nearly", "itself"
 }
 
-CLINICAL_HEAD_PHRASES = [
-    r"^the patient died from\s+",
-    r"^the patient died of\s+",
-    r"^death resulted from\s+",
-    r"^died from\s+",
-    r"^died of\s+",
-    r"^because of\s+",
-    r"^as a complication of\s+",
-    r"^complication of\s+",
-    r"^resulted from\s+",
-    r"^occurred in the context of\s+",
-    r"^in the context of\s+",
-    r"^developed on the background of\s+",
-    r"^on the background of\s+",
-]
-
-NON_CAUSE_LEADINS = [
-    "which developed",
-    "which had progressed",
-    "a condition that had progressed",
-    "this gastrointestinal complication occurred",
-    "the diabetes itself developed",
-]
-
-INTERVAL_WORDS = [
-    "day", "days", "week", "weeks", "month", "months", "year", "years",
-    "hour", "hours", "minute", "minutes"
-]
-
 # =============================================================================
-# Cause parsing
-# =============================================================================
-def strip_head_phrases(text: str) -> str:
-    s = text.strip(" ,.;:-")
-    changed = True
-    while changed:
-        changed = False
-        for pat in CLINICAL_HEAD_PHRASES:
-            new_s = re.sub(pat, "", s, flags=re.I).strip(" ,.;:-")
-            if new_s != s:
-                s = new_s
-                changed = True
-    return s
-
-def extract_first_interval(text: str) -> Tuple[str, str]:
-    """
-    Returns cleaned_text, interval
-    Captures:
-    - (2 days)
-    - over two days
-    - lasting approximately five days
-    - present for twelve years
-    """
-    s = text
-
-    # Parentheses intervals
-    m = re.search(r"\(([^()]{1,40})\)", s)
-    if m:
-        candidate = m.group(1).strip()
-        if any(w in candidate.lower() for w in INTERVAL_WORDS):
-            cleaned = re.sub(r"\(([^()]{1,40})\)", "", s, count=1).strip(" ,.;:-")
-            return cleaned, candidate
-
-    # phrase intervals
-    patterns = [
-        r"\bover\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\blasting\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\bpresent\s+for\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\bfor\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\bapproximately\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\babout\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-        r"\bnearly\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
-    ]
-    for pat in patterns:
-        m = re.search(pat, s, flags=re.I)
-        if m:
-            interval = m.group(1).strip()
-            cleaned = re.sub(pat, "", s, count=1, flags=re.I).strip(" ,.;:-")
-            return cleaned, interval
-
-    return s.strip(" ,.;:-"), "—"
-
-def clean_cause_phrase(text: str) -> str:
-    s = normalize_text_basic(text)
-    s = strip_head_phrases(s)
-
-    for lead in NON_CAUSE_LEADINS:
-        s = s.replace(lead, " ")
-
-    # remove relative narrative tails
-    s = re.sub(r"\bwhich\b.*$", "", s).strip(" ,.;:-")
-    s = re.sub(r"\ba condition that\b.*$", "", s).strip(" ,.;:-")
-    s = re.sub(r"\bthis\b.*$", "", s).strip(" ,.;:-")
-
-    # collapse spaces
-    s = re.sub(r"\s+", " ", s).strip(" ,.;:-")
-
-    # If there is comma text, keep left side first because usually disease term is earlier
-    if "," in s:
-        left = s.split(",", 1)[0].strip()
-        if len(left) >= 4:
-            s = left
-
-    return s
-
-def split_narrative_into_segments(text: str) -> List[str]:
-    t = text.replace("\n", " ").strip()
-    t = re.sub(r"\s+", " ", t)
-
-    # Split direct causal links
-    parts = re.split(r"\b(?:due to|because of|resulting from|caused by|secondary to)\b", t, flags=re.I)
-    parts = [p.strip(" ,.;:-") for p in parts if p.strip(" ,.;:-")]
-    return parts
-
-def classify_segment(seg: str) -> str:
-    s = normalize_text_basic(seg)
-    for h in OTHER_CONDITION_HINTS:
-        if h in s:
-            return "other"
-    return "chain"
-
-OTHER_CONDITION_HINTS = [
-    "diabetes", "hypertension", "obesity", "metabolic syndrome", "dementia",
-    "chronic kidney disease", "coronary artery disease", "copd", "cancer",
-    "renal disease", "liver disease", "vasculopathy"
-]
-
-def parse_death_narrative(text: str) -> Dict:
-    raw_segments = split_narrative_into_segments(text)
-    parsed = []
-
-    for seg in raw_segments:
-        cleaned, interval = extract_first_interval(seg)
-        cause = clean_cause_phrase(cleaned)
-        if cause:
-            parsed.append({
-                "raw": seg,
-                "cause": cause,
-                "interval": interval,
-                "kind": classify_segment(cause),
-            })
-
-    # Post-process: first 1-3 segments are usually causal chain
-    chain = []
-    others = []
-    for i, x in enumerate(parsed):
-        if i < 3:
-            chain.append(x)
-        else:
-            if x["kind"] == "other":
-                others.append(x)
-            else:
-                chain.append(x)
-
-    immediate = chain[0]["cause"] if len(chain) >= 1 else ""
-    immediate_interval = chain[0]["interval"] if len(chain) >= 1 else "—"
-    contributing = [x["cause"] for x in chain[1:]]
-    contributing_intervals = [x["interval"] for x in chain[1:]]
-
-    # if chain items clearly include chronic conditions, move them to Part II
-    fixed_contrib = []
-    fixed_contrib_intervals = []
-    for c, iv in zip(contributing, contributing_intervals):
-        lc = normalize_text_basic(c)
-        if any(h in lc for h in OTHER_CONDITION_HINTS):
-            others.append({"cause": c, "interval": iv, "kind": "other", "raw": c})
-        else:
-            fixed_contrib.append(c)
-            fixed_contrib_intervals.append(iv)
-
-    return {
-        "immediate_cause": immediate,
-        "contributing_causes": fixed_contrib,
-        "other_conditions": [x["cause"] for x in others],
-        "intervals": {
-            "immediate_cause": immediate_interval,
-            "contributing_causes": fixed_contrib_intervals,
-            "other_conditions": [x["interval"] for x in others],
-        },
-        "segments_debug": parsed,
-    }
-
-# =============================================================================
-# Download
+# Google Drive download
 # =============================================================================
 def _gdrive_download(file_id: str, dest_path: str) -> None:
     import requests
@@ -558,6 +398,7 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner="Loading Excel from Google Drive...")
 def load_excel_from_drive_file(file_id: str) -> pd.DataFrame:
+    os.makedirs(CACHE_DIR, exist_ok=True)
     xlsx_path = os.path.join(CACHE_DIR, "icd_source.xlsx")
     if not os.path.exists(xlsx_path):
         _gdrive_download(file_id, xlsx_path)
@@ -566,6 +407,7 @@ def load_excel_from_drive_file(file_id: str) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner="Loading metadata...")
 def load_metadata(metadata_id: str) -> pd.DataFrame:
+    os.makedirs(CACHE_DIR, exist_ok=True)
     meta_path = os.path.join(CACHE_DIR, "metadata.pkl")
     if not os.path.exists(meta_path):
         _gdrive_download(metadata_id, meta_path)
@@ -629,8 +471,16 @@ def load_faiss_resources(emb_id: str, faiss_id: str):
     return None
 
 # =============================================================================
-# Search
+# Retrieval
 # =============================================================================
+def expand_query(query: str) -> str:
+    q = normalize_text_basic(query)
+    expansions = []
+    for key, vals in LAY_QUERY_EXPANSIONS.items():
+        if key in q:
+            expansions.extend(vals)
+    return (query + " " + " ".join(expansions)).strip() if expansions else query
+
 def row_to_dict(row, score: float = 0.0) -> Dict:
     return {
         "code": str(row.get("Code", "")),
@@ -644,34 +494,6 @@ def row_to_dict(row, score: float = 0.0) -> Dict:
         "score": float(score),
     }
 
-def expand_query(query: str) -> str:
-    q = normalize_text_basic(query)
-    expansions = []
-    for key, vals in LAY_QUERY_EXPANSIONS.items():
-        if key in q:
-            expansions.extend(vals)
-    return (query + " " + " ".join(expansions)).strip() if expansions else query
-
-def diabetes_type_hint(query: str) -> Optional[str]:
-    q = normalize_text_basic(query)
-    if re.search(r"\b(type\s*2|type\s*ii|non[-\s]?insulin[-\s]?dependent)\b", q):
-        return "type2"
-    if re.search(r"\b(type\s*1|type\s*i|insulin[-\s]?dependent)\b", q):
-        return "type1"
-    return None
-
-def detect_ambiguous_query(query: str) -> bool:
-    q = normalize_text_basic(query)
-    return q in AMBIGUOUS_TERMS or len(tokenize(q)) <= 1
-
-def query_indicates_external_cause(query: str) -> bool:
-    q = normalize_text_basic(query)
-    triggers = [
-        "accident", "injury", "collision", "fall", "burn", "poisoning", "vehicle",
-        "atv", "road traffic", "assault", "homicide", "suicide", "gunshot", "stab"
-    ]
-    return any(t in q for t in triggers)
-
 def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
     q = query.strip().upper().replace(" ", "")
     if re.fullmatch(r"[A-TV-Z][0-9][0-9](?:\.[0-9A-Z]+)?", q):
@@ -680,7 +502,7 @@ def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
         return [(int(i), 1.0) for i in hits]
     return []
 
-def semantic_search(df: pd.DataFrame, faiss_index, query: str, top_k: int = 40) -> List[Tuple[int, float]]:
+def semantic_search(df: pd.DataFrame, faiss_index, query: str, top_k: int = 50) -> List[Tuple[int, float]]:
     if faiss_index is None:
         return []
     try:
@@ -691,7 +513,7 @@ def semantic_search(df: pd.DataFrame, faiss_index, query: str, top_k: int = 40) 
     except Exception:
         return []
 
-def bm25_search(df: pd.DataFrame, bm25, query: str, top_k: int = 40) -> List[Tuple[int, float]]:
+def bm25_search(df: pd.DataFrame, bm25, query: str, top_k: int = 50) -> List[Tuple[int, float]]:
     q = expand_query(query)
     toks = tokenize(q)
     if not toks:
@@ -745,8 +567,7 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
     if overlap:
         reasons.append(f"token overlap={overlap}")
 
-    spec = specificity_score(code)
-    score += spec * 0.03
+    score += specificity_score(code) * 0.03
 
     if role in {"immediate", "contributing"}:
         if acc is True:
@@ -759,25 +580,19 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
         score -= 3.0
         reasons.append("gender restriction conflict")
 
-    # strongly penalize external causes unless query is clearly injury-related
     if code[:1] in {"V", "W", "X", "Y"} and not query_indicates_external_cause(q):
         score -= 6.0
         reasons.append("external cause chapter penalized")
 
-    # penalize obvious procedure / device / misadventure matches for natural disease text
     if code.startswith("Y") and not query_indicates_external_cause(q):
         score -= 4.0
         reasons.append("procedure/misadventure code penalized")
 
-    # ARDS
     if "acute respiratory distress syndrome" in q or re.fullmatch(r"ards", q):
         if code.startswith("J80"):
             score += 3.0
             reasons.append("preferred ARDS code")
-        if code.startswith(("Y", "V", "W", "X")):
-            score -= 5.0
 
-    # septic shock
     if "septic shock" in q:
         if code.startswith("R57.2"):
             score += 3.0
@@ -786,16 +601,13 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             score -= 3.0
             reasons.append("postprocedural septic shock penalized")
 
-    # peritonitis
+    if "diverticulitis" in q and code.startswith("K57"):
+        score += 3.0
+        reasons.append("preferred diverticulitis code")
+
     if "peritonitis" in q and code.startswith("K65"):
         score += 2.5
         reasons.append("preferred peritonitis code")
-
-    # diverticulitis
-    if "diverticulitis" in q:
-        if code.startswith("K57"):
-            score += 3.0
-            reasons.append("preferred diverticulitis code")
 
     d_hint = diabetes_type_hint(q)
     if d_hint == "type2":
@@ -826,29 +638,26 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             score += 2.0
             reasons.append("preferred diabetic angiopathy family")
 
-    if detect_ambiguous_query(q) and overlap < 2:
-        score -= 0.7
-
     return score, reasons
 
 def search_icd_candidates(
-    df: pd.DataFrame,
+    df_source: pd.DataFrame,
     faiss_index,
     bm25,
     query: str,
     sex_value: str,
     role: str,
-    top_k: int = 12
+    top_k: int = 12,
 ) -> List[Dict]:
-    exact_hits = exact_code_search(df, query)
-    sem_hits = semantic_search(df, faiss_index, query, top_k=50)
-    bm_hits = bm25_search(df, bm25, query, top_k=50)
+    exact_hits = exact_code_search(df_source, query)
+    sem_hits = semantic_search(df_source, faiss_index, query, top_k=50)
+    bm_hits = bm25_search(df_source, bm25, query, top_k=50)
 
     fused = reciprocal_rank_fusion([exact_hits, sem_hits, bm_hits], k=60)
 
     candidates = []
     for idx, rrf_score in fused.items():
-        row = df.iloc[idx]
+        row = df_source.iloc[idx]
         adj_score, reasons = candidate_adjustment_score(row, query, sex_value, role)
         total = rrf_score + adj_score
         item = row_to_dict(row, total)
@@ -877,44 +686,110 @@ def get_row_by_code(df: pd.DataFrame, code_str: str) -> Optional[pd.Series]:
         return matches.iloc[0]
     return None
 
-def choose_best_candidate(cands: List[Dict], role: str) -> Dict:
-    if not cands:
-        return {
-            "code_formatted": "",
-            "short_desc": "",
-            "long_desc": "",
-            "acceptable_main": "Unknown",
-            "gender_restriction": "",
-            "classification": "",
-            "note": "",
-            "score": 0.0,
-            "selection_status": "manual_review",
-            "selection_notes": "No candidate found in indexed data. Manual review required.",
-        }
+# =============================================================================
+# Claude JSON helpers
+# =============================================================================
+def call_claude_json(api_key: str, system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> dict:
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    text = resp.content[0].text.strip()
+    text = re.sub(r"^```json\s*|\s*```$", "", text).strip()
+    text = re.sub(r"^```\s*|\s*```$", "", text).strip()
+    return json.loads(text)
 
-    best = cands[0].copy()
+def extract_causes_with_claude(api_key: str, narrative: str, patient_info: dict) -> dict:
+    system_prompt = """
+You are a clinical death-certificate extraction assistant.
 
-    if best["score"] < 0.4:
-        best["selection_status"] = "manual_review"
-        best["selection_notes"] = "Low-confidence retrieval. Manual review required."
-        return best
+Task:
+Extract the death certificate structure from the doctor's narrative.
 
-    if role in {"immediate", "contributing"}:
-        acc = acceptable_main_bool(best.get("acceptable_main", ""))
-        if acc is False:
-            acceptable_alts = [x for x in cands[1:] if acceptable_main_bool(x.get("acceptable_main", "")) is True]
-            if acceptable_alts:
-                alt = acceptable_alts[0].copy()
-                alt["selection_status"] = "auto_selected"
-                alt["selection_notes"] = "Top candidate was not acceptable as a main cause; selected best acceptable alternative."
-                return alt
-            best["selection_status"] = "manual_review"
-            best["selection_notes"] = "Top candidate is not acceptable as a main cause and no strong acceptable alternative was found."
-            return best
+Rules:
+- Return only valid JSON.
+- Use standard medical English terminology.
+- Preserve the direct causal chain for Part I in order:
+  immediate cause -> due to -> due to -> underlying cause
+- Put only non-direct contributing conditions in Part II.
+- Preserve time intervals when stated.
+- Do not invent causes that are not in the text.
+- Do not include explanatory text.
+- Keep each cause as a concise medical phrase, not a full sentence.
 
-    best["selection_status"] = "auto_selected"
-    best["selection_notes"] = "Best deterministic match from indexed ICD data."
-    return best
+Return JSON exactly in this schema:
+{
+  "part1_chain": [
+    {"cause": "string", "interval": "string"}
+  ],
+  "part2_conditions": [
+    {"cause": "string", "interval": "string"}
+  ]
+}
+"""
+    user_prompt = f"""
+Patient information:
+Age: {patient_info.get("age_years", "Unknown")}
+Sex: {patient_info.get("sex", "Unknown")}
+Death type: {patient_info.get("death_type", "Unknown")}
+Chronic conditions: {", ".join(patient_info.get("chronic_conditions", []))}
+
+Narrative:
+{narrative}
+"""
+    return call_claude_json(api_key, system_prompt, user_prompt, max_tokens=900)
+
+def select_code_from_candidates_with_claude(
+    api_key: str,
+    cause_text: str,
+    role: str,
+    interval: str,
+    sex_value: str,
+    age_years: int,
+    candidates: list,
+) -> dict:
+    slim_candidates = []
+    for c in candidates:
+        slim_candidates.append({
+            "CodeFormatted": c.get("code_formatted", ""),
+            "ShortDesc": c.get("short_desc", ""),
+            "LongDesc": c.get("long_desc", ""),
+            "AcceptableMain": c.get("acceptable_main", ""),
+            "GenderRestriction": c.get("gender_restriction", ""),
+            "Classification": c.get("classification", ""),
+            "Note": c.get("note", ""),
+        })
+
+    system_prompt = """
+You are an ICD-10 coding assistant.
+
+You MUST choose only from the candidate rows provided.
+Do NOT invent codes.
+Do NOT use outside knowledge to create a new code.
+If none of the candidates are adequate, return manual_review=true and selected_code="".
+
+Return JSON exactly:
+{
+  "selected_code": "string",
+  "reason": "string",
+  "manual_review": true,
+  "acceptable_main": "string"
+}
+"""
+    user_prompt = f"""
+Cause text: {cause_text}
+Role: {role}
+Interval: {interval}
+Patient sex: {sex_value}
+Patient age: {age_years}
+
+Candidate ICD rows:
+{json.dumps(slim_candidates, ensure_ascii=False, indent=2)}
+"""
+    return call_claude_json(api_key, system_prompt, user_prompt, max_tokens=700)
 
 # =============================================================================
 # Validation
@@ -952,13 +827,13 @@ def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
         if code[:1] in {"V", "W", "X", "Y"} and not query_indicates_external_cause(cause):
             issues.append(f"{code} is an external-cause/procedure code that does not fit a natural disease phrase.")
 
-        if "respiratory distress syndrome" in cause and not code.startswith("J80"):
+        if "respiratory distress syndrome" in cause and code and not code.startswith("J80"):
             issues.append(f"{code} does not match ARDS well; expected J80 family.")
-        if "septic shock" in cause and not code.startswith("R57.2"):
+        if "septic shock" in cause and code and not code.startswith("R57.2"):
             issues.append(f"{code} does not match septic shock well; expected R57.2 family.")
-        if "diverticulitis" in cause and not code.startswith("K57"):
+        if "diverticulitis" in cause and code and not code.startswith("K57"):
             issues.append(f"{code} does not match diverticulitis well; expected K57 family.")
-        if "peritonitis" in cause and not code.startswith(("K65", "K57")):
+        if "peritonitis" in cause and code and not code.startswith(("K65", "K57")):
             issues.append(f"{code} does not match peritonitis/diverticulitis well.")
 
     for x in coded_causes:
@@ -987,59 +862,158 @@ def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
     }
 
 # =============================================================================
-# Coding pipeline
+# Hybrid coding pipeline
 # =============================================================================
-def code_causes_from_narrative(
+def code_causes_hybrid_with_claude(
+    api_key: str,
     narrative: str,
     df_source: pd.DataFrame,
     faiss_index,
     bm25,
-    sex_value: str,
-) -> Dict:
-    concepts = parse_death_narrative(narrative)
+    patient_info: dict,
+) -> dict:
+    extracted = extract_causes_with_claude(api_key, narrative, patient_info)
     coded_causes = []
 
-    immediate = concepts.get("immediate_cause", "").strip()
-    if immediate:
-        cands = search_icd_candidates(df_source, faiss_index, bm25, immediate, sex_value, role="immediate", top_k=10)
-        chosen = choose_best_candidate(cands, role="immediate")
-        chosen.update({
-            "role": "immediate",
-            "label": "Immediate cause",
-            "cause": immediate,
-            "interval": concepts["intervals"].get("immediate_cause", "—"),
-            "candidates": cands,
-        })
+    # Part I
+    for i, item in enumerate(extracted.get("part1_chain", [])):
+        role = "immediate" if i == 0 else "contributing"
+        cause = str(item.get("cause", "")).strip()
+        interval = str(item.get("interval", "—")).strip() or "—"
+        if not cause:
+            continue
+
+        cands = search_icd_candidates(
+            df_source=df_source,
+            faiss_index=faiss_index,
+            bm25=bm25,
+            query=cause,
+            sex_value=patient_info.get("sex", ""),
+            role=role,
+            top_k=10,
+        )
+
+        claude_choice = select_code_from_candidates_with_claude(
+            api_key=api_key,
+            cause_text=cause,
+            role=role,
+            interval=interval,
+            sex_value=patient_info.get("sex", ""),
+            age_years=patient_info.get("age_years", 0),
+            candidates=cands,
+        )
+
+        chosen_code = claude_choice.get("selected_code", "")
+        row = get_row_by_code(df_source, chosen_code)
+
+        if row is not None:
+            chosen = {
+                "role": role,
+                "label": "Immediate cause" if role == "immediate" else f"Due to ({i})",
+                "cause": cause,
+                "interval": interval,
+                "code_formatted": str(row["CodeFormatted"]),
+                "short_desc": str(row["ShortDesc"]),
+                "long_desc": str(row["LongDesc"]),
+                "acceptable_main": str(row["AcceptableMain"]),
+                "gender_restriction": str(row["GenderRestriction"]),
+                "classification": str(row["Classification"]),
+                "note": str(row["Note"]),
+                "selection_status": "manual_review" if claude_choice.get("manual_review", False) else "auto_selected",
+                "selection_notes": claude_choice.get("reason", ""),
+                "candidates": cands,
+            }
+        else:
+            chosen = {
+                "role": role,
+                "label": "Immediate cause" if role == "immediate" else f"Due to ({i})",
+                "cause": cause,
+                "interval": interval,
+                "code_formatted": "",
+                "short_desc": "",
+                "long_desc": "",
+                "acceptable_main": "Unknown",
+                "gender_restriction": "",
+                "classification": "",
+                "note": "",
+                "selection_status": "manual_review",
+                "selection_notes": "No valid candidate selected from file rows.",
+                "candidates": cands,
+            }
+
         coded_causes.append(chosen)
 
-    for i, c in enumerate(concepts.get("contributing_causes", [])):
-        cands = search_icd_candidates(df_source, faiss_index, bm25, c, sex_value, role="contributing", top_k=10)
-        chosen = choose_best_candidate(cands, role="contributing")
-        chosen.update({
-            "role": "contributing",
-            "label": f"Due to ({i+1})",
-            "cause": c,
-            "interval": concepts["intervals"].get("contributing_causes", ["—"] * 50)[i] if i < len(concepts["intervals"].get("contributing_causes", [])) else "—",
-            "candidates": cands,
-        })
+    # Part II
+    for i, item in enumerate(extracted.get("part2_conditions", []), start=1):
+        cause = str(item.get("cause", "")).strip()
+        interval = str(item.get("interval", "—")).strip() or "—"
+        if not cause:
+            continue
+
+        cands = search_icd_candidates(
+            df_source=df_source,
+            faiss_index=faiss_index,
+            bm25=bm25,
+            query=cause,
+            sex_value=patient_info.get("sex", ""),
+            role="other",
+            top_k=10,
+        )
+
+        claude_choice = select_code_from_candidates_with_claude(
+            api_key=api_key,
+            cause_text=cause,
+            role="other",
+            interval=interval,
+            sex_value=patient_info.get("sex", ""),
+            age_years=patient_info.get("age_years", 0),
+            candidates=cands,
+        )
+
+        chosen_code = claude_choice.get("selected_code", "")
+        row = get_row_by_code(df_source, chosen_code)
+
+        if row is not None:
+            chosen = {
+                "role": "other",
+                "label": f"Other condition ({i})",
+                "cause": cause,
+                "interval": interval,
+                "code_formatted": str(row["CodeFormatted"]),
+                "short_desc": str(row["ShortDesc"]),
+                "long_desc": str(row["LongDesc"]),
+                "acceptable_main": str(row["AcceptableMain"]),
+                "gender_restriction": str(row["GenderRestriction"]),
+                "classification": str(row["Classification"]),
+                "note": str(row["Note"]),
+                "selection_status": "manual_review" if claude_choice.get("manual_review", False) else "auto_selected",
+                "selection_notes": claude_choice.get("reason", ""),
+                "candidates": cands,
+            }
+        else:
+            chosen = {
+                "role": "other",
+                "label": f"Other condition ({i})",
+                "cause": cause,
+                "interval": interval,
+                "code_formatted": "",
+                "short_desc": "",
+                "long_desc": "",
+                "acceptable_main": "Unknown",
+                "gender_restriction": "",
+                "classification": "",
+                "note": "",
+                "selection_status": "manual_review",
+                "selection_notes": "No valid candidate selected from file rows.",
+                "candidates": cands,
+            }
+
         coded_causes.append(chosen)
 
-    other_intervals = concepts["intervals"].get("other_conditions", [])
-    for i, c in enumerate(concepts.get("other_conditions", [])):
-        cands = search_icd_candidates(df_source, faiss_index, bm25, c, sex_value, role="other", top_k=10)
-        chosen = choose_best_candidate(cands, role="other")
-        chosen.update({
-            "role": "other",
-            "label": f"Other condition ({i+1})",
-            "cause": c,
-            "interval": other_intervals[i] if i < len(other_intervals) else "—",
-            "candidates": cands,
-        })
-        coded_causes.append(chosen)
+    validation = validate_certificate(coded_causes, patient_info.get("sex", ""))
 
-    validation = validate_certificate(coded_causes, sex_value)
     return {
-        "concepts": concepts,
+        "concepts": extracted,
         "coded_causes": coded_causes,
         "validation": validation,
     }
@@ -1058,8 +1032,6 @@ def refresh_code_from_manual_edit(df_source: pd.DataFrame, item: Dict, new_code:
         updated["note"] = ""
         updated["selection_status"] = "manual_review"
         updated["selection_notes"] = "Manual code not found in the loaded ICD source."
-        updated["score"] = 0.0
-        updated["reasons"] = ["manual edit"]
         return updated
 
     updated["code_formatted"] = str(row["CodeFormatted"])
@@ -1071,8 +1043,6 @@ def refresh_code_from_manual_edit(df_source: pd.DataFrame, item: Dict, new_code:
     updated["note"] = str(row["Note"])
     updated["selection_status"] = "manual_selected"
     updated["selection_notes"] = "Manually edited code found in ICD source and refreshed."
-    updated["score"] = updated.get("score", 0.0)
-    updated["reasons"] = ["manual edit refresh"]
 
     if not is_gender_allowed(updated["gender_restriction"], sex_value):
         updated["selection_status"] = "manual_review"
@@ -1091,7 +1061,8 @@ with st.sidebar:
         '<div style="font-size:.78rem;opacity:.85;padding:.3rem 0;line-height:1.7">'
         'Source of truth: Excel / metadata<br>'
         'Retrieval: FAISS + BM25 + deterministic rules<br>'
-        'No LLM usage</div>',
+        'Extraction: Claude<br>'
+        'Coding: file candidates only</div>',
         unsafe_allow_html=True,
     )
 
@@ -1117,9 +1088,14 @@ with st.sidebar:
     doctor_name   = st.text_input("Certifying Physician", value="")
 
     st.markdown("---")
+    if API_KEY:
+        st.success("Anthropic API key found.")
+    else:
+        st.error("ANTHROPIC_API_KEY missing in Streamlit secrets.")
+
     st.markdown(
-        '<div style="font-size:.72rem;opacity:.65;text-align:center;line-height:2">'
-        'Ministry of Health<br>Deterministic ICD-10 Coding v3</div>',
+        '<div style="font-size:.72rem;opacity:.65;text-align:center;line-height:2;margin-top:.8rem">'
+        'Ministry of Health<br>Hybrid ICD-10 Coding v1</div>',
         unsafe_allow_html=True,
     )
 
@@ -1355,6 +1331,8 @@ elif st.session_state.page == 3:
                 st.error("Please enter a narrative description.")
             elif st.session_state.df_source is None:
                 st.error("ICD source data failed to load. Check the sidebar error messages.")
+            elif not API_KEY:
+                st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
             else:
                 st.session_state.form_data["free_text"] = free_text
                 st.session_state.icd_results = None
@@ -1378,6 +1356,10 @@ elif st.session_state.page == 4:
             st.rerun()
         st.stop()
 
+    if not API_KEY:
+        st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
+        st.stop()
+
     if not fd.get("free_text", "").strip():
         st.error("No cause narrative found.")
         if st.button("Back"):
@@ -1386,13 +1368,21 @@ elif st.session_state.page == 4:
         st.stop()
 
     if st.session_state.icd_results is None:
-        with st.spinner("Parsing narrative and coding against ICD source..."):
-            st.session_state.icd_results = code_causes_from_narrative(
+        patient_info = {
+            "age_years": fd.get("age_years", 0),
+            "sex": fd.get("sex", ""),
+            "death_type": fd.get("death_type", ""),
+            "chronic_conditions": fd.get("chronic_conditions", []),
+        }
+
+        with st.spinner("Extracting causes with Claude and coding from file candidates..."):
+            st.session_state.icd_results = code_causes_hybrid_with_claude(
+                api_key=API_KEY,
                 narrative=fd["free_text"],
                 df_source=df_source,
                 faiss_index=faiss_index,
                 bm25=bm25,
-                sex_value=fd.get("sex", ""),
+                patient_info=patient_info,
             )
 
     results = st.session_state.icd_results
@@ -1425,7 +1415,7 @@ elif st.session_state.page == 4:
             unsafe_allow_html=True,
         )
 
-    tab_res, tab_cert, tab_debug = st.tabs(["ICD-10 Codes", "Certificate Preview", "Parsed Structure"])
+    tab_res, tab_cert, tab_debug = st.tabs(["ICD-10 Codes", "Certificate Preview", "Extracted Structure"])
 
     with tab_res:
         role_hdr = {"immediate": "#006940", "contributing": "#2d7a4f", "other": "#5a7060"}
@@ -1660,17 +1650,8 @@ elif st.session_state.page == 4:
         )
 
     with tab_debug:
-        st.subheader("Parsed Narrative")
-        st.json({
-            "immediate_cause": concepts.get("immediate_cause", ""),
-            "contributing_causes": concepts.get("contributing_causes", []),
-            "other_conditions": concepts.get("other_conditions", []),
-            "intervals": concepts.get("intervals", {}),
-        })
-
-        if "segments_debug" in concepts:
-            st.subheader("Detected Segments")
-            st.dataframe(pd.DataFrame(concepts["segments_debug"]), use_container_width=True)
+        st.subheader("Claude-extracted structure")
+        st.json(concepts)
 
     st.markdown("---")
     b1, b2, _ = st.columns([1, 1, 6])
