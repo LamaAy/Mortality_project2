@@ -562,10 +562,45 @@ elif st.session_state.page == 2:
             st.session_state.page = 3; st.rerun()
 
 # =============================================================================
-#  PAGE 3 — Causes of Death
+#  PAGE 3 — Causes of Death  (fields pre-filled from session if returning)
 # =============================================================================
 elif st.session_state.page == 3:
     render_steps(3)
+    fd = st.session_state.form_data
+
+    # Helper: look up a single ICD code in the dataframe
+    def icd_status(df, code_str):
+        """Return dict with acceptable/gender info for a typed code, or None."""
+        if df is None or not code_str:
+            return None
+        code_clean = code_str.strip().upper().replace(" ", "")
+        row = df[df["CodeFormatted"].str.upper().str.replace(" ","") == code_clean]
+        if row.empty:
+            row = df[df["Code"].str.upper().str.replace(" ","") == code_clean]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return {
+            "short_desc":      str(r.get("ShortDesc","")),
+            "acceptable_main": str(r.get("AcceptableMain","")),
+            "gender":          str(r.get("GenderRestriction","")),
+            "classification":  str(r.get("Classification","")),
+        }
+
+    def icd_badge_html(info, gender_str=""):
+        if info is None:
+            return '<span style="color:#999;font-size:.78rem">رمز غير موجود في القاعدة</span>'
+        acc   = info["acceptable_main"]
+        color = "#006940" if acc == "Acceptable" else "#c0392b"
+        label = "مقبول" if acc == "Acceptable" else "غير مقبول / محدود"
+        gender_warn = ""
+        if gender_str and info["gender"] not in ("Both", ""):
+            if (gender_str == "Male" and info["gender"] == "Female") or                (gender_str == "Female" and info["gender"] == "Male"):
+                gender_warn = '<span style="background:#e67e22;color:white;border-radius:3px;padding:1px 7px;font-size:.7rem;margin-right:4px">تحذير جنس</span>'
+        return (f'<span style="background:{color};color:white;border-radius:3px;padding:2px 9px;font-size:.75rem;font-weight:600">{label}</span> '                f'<span style="font-size:.8rem;color:#444;margin-right:6px">{info["short_desc"][:60]}</span>'                f'{gender_warn}')
+
+    df_icd   = st.session_state.df_icd
+    gender_p = "Male" if "ذكر" in fd.get("sex","") else "Female"
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">أسباب الوفاة / Causes of Death — WHO Format</div>', unsafe_allow_html=True)
@@ -578,39 +613,83 @@ elif st.session_state.page == 3:
     """, unsafe_allow_html=True)
 
     free_text = st.text_area(
-        "وصف حر لأسباب الوفاة / Free-text description (Arabic or English)",
-        height=130,
-        placeholder="مثال: توفي المريض إثر احتشاء عضلة القلب الحاد الناتج عن تصلب الشرايين التاجية بسبب داء السكري.",
+        "وصف حر لأسباب الوفاة / Free-text description",
+        value=fd.get("free_text",""),
+        height=110,
+        placeholder="مثال: توفي المريض إثر احتشاء عضلة القلب الحاد...",
     )
 
-    st.markdown("أو أدخل الأسباب منفردة / Or enter separately:")
-    c1, c2 = st.columns(2)
-    with c1:
-        cause_a    = st.text_input("(أ) السبب الفوري / Immediate Cause",  placeholder="Acute myocardial infarction")
-        interval_a = st.text_input("الفترة الزمنية (أ)",                   placeholder="2 hours")
-        cause_b    = st.text_input("(ب) السبب المؤدي / Underlying Cause",  placeholder="Coronary atherosclerosis")
-        interval_b = st.text_input("الفترة الزمنية (ب)",                   placeholder="5 years")
-    with c2:
-        cause_c    = st.text_input("(ج) سبب آخر / Other Cause",            placeholder="Diabetes mellitus type 2")
-        interval_c = st.text_input("الفترة الزمنية (ج)",                   placeholder="10 years")
-        cause_d    = st.text_input("(د) سبب آخر / Other Cause",            placeholder="Hypertension")
-        interval_d = st.text_input("الفترة الزمنية (د)",                   placeholder="15 years")
+    st.markdown("---")
+    st.markdown('<div style="font-size:.88rem;font-weight:700;color:var(--green);margin-bottom:.6rem">أدخل الأسباب منفردة / Enter separately (WHO format)</div>', unsafe_allow_html=True)
+
+    # ── Row A ──
+    ca1, ca2, ca3 = st.columns([3, 1.5, 1.5])
+    with ca1:
+        cause_a = st.text_input("(أ) السبب الفوري / Immediate Cause",
+                                value=fd.get("cause_a",""), placeholder="Acute heart failure")
+    with ca2:
+        interval_a = st.text_input("الفترة الزمنية (أ)", value=fd.get("interval_a",""), placeholder="hours / days")
+    with ca3:
+        icd_a = st.text_input("رمز ICD-10 (أ)", value=fd.get("icd_a",""), placeholder="I50.9")
+    if icd_a and df_icd is not None:
+        info = icd_status(df_icd, icd_a)
+        st.markdown(icd_badge_html(info, gender_p), unsafe_allow_html=True)
+
+    # ── Row B ──
+    cb1, cb2, cb3 = st.columns([3, 1.5, 1.5])
+    with cb1:
+        cause_b = st.text_input("(ب) السبب المؤدي / Underlying Cause",
+                                value=fd.get("cause_b",""), placeholder="Acute myocardial infarction")
+    with cb2:
+        interval_b = st.text_input("الفترة الزمنية (ب)", value=fd.get("interval_b",""), placeholder="days")
+    with cb3:
+        icd_b = st.text_input("رمز ICD-10 (ب)", value=fd.get("icd_b",""), placeholder="I21.0")
+    if icd_b and df_icd is not None:
+        info = icd_status(df_icd, icd_b)
+        st.markdown(icd_badge_html(info, gender_p), unsafe_allow_html=True)
+
+    # ── Row C ──
+    cc1, cc2, cc3 = st.columns([3, 1.5, 1.5])
+    with cc1:
+        cause_c = st.text_input("(ج) سبب آخر / Other Cause",
+                                value=fd.get("cause_c",""), placeholder="Coronary atherosclerosis")
+    with cc2:
+        interval_c = st.text_input("الفترة الزمنية (ج)", value=fd.get("interval_c",""), placeholder="years")
+    with cc3:
+        icd_c = st.text_input("رمز ICD-10 (ج)", value=fd.get("icd_c",""), placeholder="I25.1")
+    if icd_c and df_icd is not None:
+        info = icd_status(df_icd, icd_c)
+        st.markdown(icd_badge_html(info, gender_p), unsafe_allow_html=True)
+
+    # ── Row D ──
+    cd1, cd2, cd3 = st.columns([3, 1.5, 1.5])
+    with cd1:
+        cause_d = st.text_input("(د) سبب آخر / Other Cause",
+                                value=fd.get("cause_d",""), placeholder="Diabetes mellitus type 2")
+    with cd2:
+        interval_d = st.text_input("الفترة الزمنية (د)", value=fd.get("interval_d",""), placeholder="years")
+    with cd3:
+        icd_d = st.text_input("رمز ICD-10 (د)", value=fd.get("icd_d",""), placeholder="E11.9")
+    if icd_d and df_icd is not None:
+        info = icd_status(df_icd, icd_d)
+        st.markdown(icd_badge_html(info, gender_p), unsafe_allow_html=True)
 
     other_cond = st.text_area(
         "حالات أخرى مساهمة / Other Contributing Conditions",
+        value=fd.get("other_conditions_text",""),
         placeholder="أمراض أخرى ساهمت في الوفاة لكنها ليست السبب المباشر",
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Manual search
-    if st.session_state.df_icd is not None:
+    # Manual ICD search
+    if df_icd is not None:
         with st.expander("بحث يدوي في ICD-10 / Manual ICD-10 Search"):
-            q = st.text_input("ابحث عن رمز أو تشخيص", placeholder="myocardial infarction, diabetes...")
+            q = st.text_input("ابحث عن رمز أو تشخيص", placeholder="heart failure, diabetes...")
             if q and len(q) >= 3:
-                hits = search_icd(st.session_state.df_icd, st.session_state.faiss_index, q, top_k=8)
+                hits = search_icd(df_icd, st.session_state.faiss_index, q, top_k=8)
                 if hits:
                     for r in hits:
-                        col = "var(--green)" if r["acceptable_main"] == "Acceptable" else "#c0392b"
+                        col = "var(--green)" if r["acceptable_main"]=="Acceptable" else "#c0392b"
                         st.markdown(f"""
                         <div class="icd-card">
                           <span class="icd-code">{r['code_formatted']}</span>
@@ -620,9 +699,9 @@ elif st.session_state.page == 3:
                           <div style="font-size:.8rem;color:#4a6a4e">{r['long_desc']}</div>
                         </div>""", unsafe_allow_html=True)
                 else:
-                    st.info("لا توجد نتائج مطابقة.")
+                    st.info("لا توجد نتائج.")
     else:
-        st.warning("يرجى تحميل بيانات ICD-10 من الشريط الجانبي.")
+        st.warning("يرجى تحميل بيانات ICD-10 أولاً.")
 
     b1, b2, _ = st.columns([1, 1, 6])
     with b1:
@@ -632,17 +711,18 @@ elif st.session_state.page == 3:
         if st.button("تحليل وتوصيات", use_container_width=True):
             if not free_text and not cause_a:
                 st.error("يرجى إدخال وصف أسباب الوفاة.")
-            elif st.session_state.df_icd is None:
+            elif df_icd is None:
                 st.error("يرجى تحميل بيانات ICD-10 أولاً.")
             else:
                 st.session_state.form_data.update({
                     "free_text": free_text,
-                    "cause_a": cause_a, "interval_a": interval_a,
-                    "cause_b": cause_b, "interval_b": interval_b,
-                    "cause_c": cause_c, "interval_c": interval_c,
-                    "cause_d": cause_d, "interval_d": interval_d,
+                    "cause_a": cause_a, "interval_a": interval_a, "icd_a": icd_a,
+                    "cause_b": cause_b, "interval_b": interval_b, "icd_b": icd_b,
+                    "cause_c": cause_c, "interval_c": interval_c, "icd_c": icd_c,
+                    "cause_d": cause_d, "interval_d": interval_d, "icd_d": icd_d,
                     "other_conditions_text": other_cond,
                 })
+                st.session_state.icd_results = None
                 st.session_state.page = 4; st.rerun()
 
 # =============================================================================
@@ -652,10 +732,9 @@ elif st.session_state.page == 4:
     render_steps(4)
     fd = st.session_state.form_data
 
-    # Compose combined text
-    combined = fd.get("free_text", "")
-    for label, ck, ik in [("Immediate", "cause_a","interval_a"),("Underlying","cause_b","interval_b"),
-                           ("Other",    "cause_c","interval_c"),("Other",     "cause_d","interval_d")]:
+    combined = fd.get("free_text","")
+    for label, ck, ik in [("Immediate","cause_a","interval_a"),("Underlying","cause_b","interval_b"),
+                           ("Other","cause_c","interval_c"),("Other","cause_d","interval_d")]:
         if fd.get(ck):
             combined += f"\n{label} cause: {fd[ck]} (interval: {fd.get(ik,'')})"
     if fd.get("other_conditions_text"):
@@ -667,7 +746,6 @@ elif st.session_state.page == 4:
                   f"Autopsy required: {fd.get('autopsy_required','No')}\n"
                   f"Chronic conditions: {', '.join(fd.get('chronic_conditions',[]))}")
 
-    # Run analysis once
     if st.session_state.icd_results is None:
         with st.spinner("جارٍ تحليل أسباب الوفاة واسترجاع رموز ICD-10..."):
             try:
@@ -675,20 +753,17 @@ elif st.session_state.page == 4:
                 df         = st.session_state.df_icd
                 fidx       = st.session_state.faiss_index
                 candidates = {}
-
                 if concepts.get("immediate_cause"):
                     candidates["immediate_cause"] = {
-                        "query":      concepts["immediate_cause"],
+                        "query": concepts["immediate_cause"],
                         "candidates": search_icd(df, fidx, concepts["immediate_cause"], 5),
                     }
                 contrib = [{"query": c, "candidates": search_icd(df, fidx, c, 4)}
                            for c in (concepts.get("contributing_causes") or [])]
                 if contrib: candidates["contributing_causes"] = contrib
-
                 other = [{"query": c, "candidates": search_icd(df, fidx, c, 3)}
                          for c in (concepts.get("other_conditions") or [])]
                 if other: candidates["other_conditions"] = other
-
                 ai_rec = get_recommendation(concepts, candidates, gender_str, age_str, extra)
                 st.session_state.icd_results = {
                     "concepts": concepts, "candidates": candidates, "ai_suggestion": ai_rec,
@@ -698,145 +773,160 @@ elif st.session_state.page == 4:
                 st.session_state.icd_results = None
 
     if st.session_state.icd_results:
-        res        = st.session_state.icd_results
-        concepts   = res["concepts"]
-        candidates = res["candidates"]
-        ai_rec     = res["ai_suggestion"]
+        res      = st.session_state.icd_results
+        concepts = res["concepts"]
+        cands    = res["candidates"]
+        ai_rec   = res["ai_suggestion"]
 
         tab1, tab2, tab3 = st.tabs(["توصيات الترميز", "مرشحو ICD-10", "معاينة الشهادة"])
 
-        # ── توصيات الترميز ─────────────────────────────────────────────────
+        # ── Tab 1: توصيات ──────────────────────────────────────────────────
         with tab1:
-            # — Extracted concepts card —
             ivs        = concepts.get("intervals", {}) or {}
-            imm_int    = ivs.get("immediate_cause", "—")
-            contrib_iv = ivs.get("contributing_causes", [])
+            imm_int    = ivs.get("immediate_cause","—")
+            contrib_iv = ivs.get("contributing_causes",[])
+            df_icd     = st.session_state.df_icd
 
-            imm_row = f"""
+            # Concepts summary
+            rows_html = f"""
             <div style="display:flex;justify-content:space-between;align-items:center;
-                        padding:.5rem .8rem;background:#f0faf4;border-radius:6px;margin-bottom:.5rem;
+                        padding:.5rem .8rem;background:#f0faf4;border-radius:6px;margin-bottom:.4rem;
                         border:1px solid #9ecaad">
               <div>
-                <div style="font-size:.72rem;color:var(--muted);font-weight:600;letter-spacing:.04em">السبب الفوري / IMMEDIATE CAUSE</div>
-                <div style="font-size:.97rem;font-weight:700;color:var(--green);margin-top:2px">{concepts.get('immediate_cause','—')}</div>
+                <div style="font-size:.7rem;color:var(--muted);font-weight:700;letter-spacing:.04em">السبب الفوري</div>
+                <div style="font-size:.95rem;font-weight:700;color:var(--green)">{concepts.get('immediate_cause','—')}</div>
               </div>
-              <div style="text-align:left;color:var(--muted);font-size:.82rem">{imm_int}</div>
+              <div style="font-size:.8rem;color:var(--muted)">{imm_int}</div>
             </div>"""
 
-            contrib_rows_html = ""
             for idx, c in enumerate(concepts.get("contributing_causes") or []):
                 iv = contrib_iv[idx] if idx < len(contrib_iv) else "—"
-                letter = chr(0x628 + idx)  # ب، ج، د
-                contrib_rows_html += f"""
-            <div style="display:flex;justify-content:space-between;align-items:center;
-                        padding:.45rem .8rem;border-bottom:1px solid #e8ede9">
-              <div style="display:flex;gap:.6rem;align-items:center">
-                <span style="background:var(--green);color:white;border-radius:50%;
-                             width:22px;height:22px;display:inline-flex;align-items:center;
-                             justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0">
-                  {chr(0x627 + idx + 1)}
-                </span>
-                <span style="font-size:.9rem">{c}</span>
-              </div>
-              <span style="color:var(--muted);font-size:.8rem;white-space:nowrap">{iv}</span>
+                rows_html += f"""
+            <div style="display:flex;justify-content:space-between;padding:.4rem .8rem;
+                        border-bottom:1px solid #e8ede9;font-size:.88rem">
+              <span>{c}</span>
+              <span style="color:var(--muted);font-size:.8rem">{iv}</span>
             </div>"""
 
-            other_rows_html = ""
+            other_html = ""
             for c in (concepts.get("other_conditions") or []):
-                other_rows_html += f"""
-            <div style="padding:.4rem .8rem;border-bottom:1px solid #f0f4f0;
-                        font-size:.88rem;color:#3a5a3e">{c}</div>"""
+                other_html += f'<div style="padding:.35rem .8rem;font-size:.86rem;color:#3a5a3e;border-bottom:1px solid #f0f4f0">{c}</div>'
 
-            st.markdown(f"""
+            full_concepts_html = f"""
             <div class="section-card">
-              <div class="section-title">المفاهيم الطبية المستخرجة / Extracted Concepts</div>
-              {imm_row}
-              {"<div style='background:white;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:.6rem'>" + contrib_rows_html + "</div>" if contrib_rows_html else ""}
-              {"<div style='margin-top:.5rem'><div style='font-size:.72rem;color:var(--muted);font-weight:600;letter-spacing:.04em;margin-bottom:.3rem'>حالات أخرى / OTHER CONDITIONS</div><div style=background:white;border:1px solid var(--border);border-radius:6px;overflow:hidden>' + other_rows_html + '</div></div>" if other_rows_html else ""}
-            </div>
-            """, unsafe_allow_html=True)
+              <div class="section-title">المفاهيم المستخرجة / Extracted Concepts</div>
+              {rows_html}
+              {"<div style='margin-top:.5rem;border:1px solid var(--border);border-radius:6px;overflow:hidden'>" + other_html + "</div>" if other_html else ""}
+            </div>"""
+            st.markdown(full_concepts_html, unsafe_allow_html=True)
 
-            # — AI recommendation rendered as structured HTML —
-            # Convert the markdown text to clean HTML sections
-            def render_recommendation(text: str) -> str:
-                """Convert AI markdown output to clean styled HTML."""
-                lines  = text.strip().splitlines()
-                html   = ""
-                i      = 0
+            # Doctor-editable ICD fields with live validation
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">رموز ICD-10 المقترحة — قابلة للتعديل</div>', unsafe_allow_html=True)
+
+            def icd_status(df, code_str):
+                if df is None or not code_str: return None
+                code_clean = code_str.strip().upper().replace(" ","")
+                row = df[df["CodeFormatted"].str.upper().str.replace(" ","") == code_clean]
+                if row.empty:
+                    row = df[df["Code"].str.upper().str.replace(" ","") == code_clean]
+                if row.empty: return None
+                r = row.iloc[0]
+                return {"short_desc": str(r.get("ShortDesc","")),
+                        "acceptable_main": str(r.get("AcceptableMain","")),
+                        "gender": str(r.get("GenderRestriction","")),
+                        "classification": str(r.get("Classification",""))}
+
+            def show_icd_field(label, cause_text, default_code, key, gender_str):
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    code = st.text_input(label, value=default_code, key=key)
+                with c2:
+                    st.markdown(f'<div style="font-size:.86rem;padding-top:.3rem;color:#333">{cause_text}</div>', unsafe_allow_html=True)
+                    if code and df_icd is not None:
+                        info = icd_status(df_icd, code)
+                        if info is None:
+                            st.markdown('<span style="background:#999;color:white;border-radius:3px;padding:2px 8px;font-size:.74rem">غير موجود في القاعدة</span>', unsafe_allow_html=True)
+                        else:
+                            acc   = info["acceptable_main"]
+                            color = "#006940" if acc == "Acceptable" else "#c0392b"
+                            label_ar = "مقبول كسبب رئيسي" if acc == "Acceptable" else "غير مقبول / محدود"
+                            gender_warn = ""
+                            if info["gender"] not in ("Both",""):
+                                if (gender_str=="Male" and info["gender"]=="Female") or                                    (gender_str=="Female" and info["gender"]=="Male"):
+                                    gender_warn = '<span style="background:#e67e22;color:white;border-radius:3px;padding:2px 7px;font-size:.72rem;margin-right:5px">تحذير: غير متوافق مع الجنس</span>'
+                            st.markdown(
+                                f'<span style="background:{color};color:white;border-radius:3px;padding:2px 9px;font-size:.76rem;font-weight:600">{label_ar}</span> '                                f'<span style="font-size:.8rem;color:#444;margin-right:4px">{info["short_desc"][:55]}</span>'                                f'{gender_warn}',
+                                unsafe_allow_html=True
+                            )
+                return code
+
+            # Extract suggested codes from AI recommendation
+            def extract_codes_from_ai(text):
+                return re.findall(r'\b([A-Z]\d{2}[\.\d]*)\b', text)
+
+            ai_codes = extract_codes_from_ai(ai_rec)
+
+            imm_code  = fd.get("icd_a","") or (ai_codes[0] if len(ai_codes) > 0 else "")
+            cont_code = fd.get("icd_b","") or (ai_codes[1] if len(ai_codes) > 1 else "")
+            oth_code  = fd.get("icd_c","") or (ai_codes[2] if len(ai_codes) > 2 else "")
+            oth2_code = fd.get("icd_d","") or (ai_codes[3] if len(ai_codes) > 3 else "")
+
+            show_icd_field("(أ) السبب الفوري", concepts.get("immediate_cause","—"), imm_code,  "final_icd_a", gender_str)
+            for i, c in enumerate(concepts.get("contributing_causes") or []):
+                default = [cont_code, oth_code][i] if i < 2 else ""
+                show_icd_field(f"({'ب' if i==0 else 'ج'}) مساهم", c, default, f"final_icd_cont_{i}", gender_str)
+            for i, c in enumerate(concepts.get("other_conditions") or []):
+                default = oth2_code if i == 0 else ""
+                show_icd_field(f"(د+) حالة أخرى", c, default, f"final_icd_other_{i}", gender_str)
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            # AI recommendation
+            def render_rec(text):
+                lines = text.strip().splitlines()
+                html  = ""
+                i     = 0
                 while i < len(lines):
                     line = lines[i].strip()
-                    if not line:
-                        i += 1
-                        continue
-
-                    # Section headers — lines starting with ( or numbered
-                    if re.match(r"^\(?[١٢٣٤٥٦1-6]\)?[\.\-\)]", line) or re.match(r"^#{1,3}\s", line):
-                        clean = re.sub(r"^#{1,3}\s*|\*+", "", line).strip()
-                        html += (f'<div style="font-size:.88rem;font-weight:700;color:var(--green);'
-                                 f'border-right:3px solid var(--green);padding-right:.6rem;'
-                                 f'margin:1rem 0 .4rem">{clean}</div>')
-
-                    # ICD code lines — contain pattern like I50.1 or E11.9
-                    elif re.search(r"\b[A-Z]\d{2}[\.\d]*\b", line):
-                        code_match = re.search(r"\b([A-Z]\d{2}[\.\d]*)\b", line)
-                        code       = code_match.group(1) if code_match else ""
-                        desc       = re.sub(r"\*+|\b[A-Z]\d{2}[\.\d]*\b", "", line).strip(" -–*:")
-                        # grab any sub-bullets
+                    if not line: i += 1; continue
+                    if re.match(r"^\(?[١٢٣٤٥٦1-6]\)?[\.\ \-\)]", line):
+                        clean = re.sub(r"\*+","",line).strip()
+                        html += f'<div style="font-size:.88rem;font-weight:700;color:var(--green);border-right:3px solid var(--green);padding-right:.6rem;margin:1rem 0 .35rem">{clean}</div>'
+                    elif re.search(r"\b[A-Z]\d{{2}}[\.\d]*\b", line):
+                        m    = re.search(r"\b([A-Z]\d{{2}}[\.\d]*)\b", line)
+                        code = m.group(1) if m else ""
+                        desc = re.sub(r"\*+|\b[A-Z]\d{{2}}[\.\d]*\b","",line).strip(" -–*:")
                         notes_html = ""
-                        while i + 1 < len(lines) and lines[i+1].strip().startswith("*"):
+                        while i+1 < len(lines) and lines[i+1].strip().startswith("*"):
                             i += 1
-                            note = lines[i].strip().lstrip("*").strip()
-                            notes_html += f'<div style="font-size:.78rem;color:var(--muted);padding-right:.5rem">— {note}</div>'
-                        html += f"""
-                        <div style="display:flex;gap:.8rem;align-items:flex-start;
-                                    padding:.55rem .8rem;background:#f0faf4;border-radius:6px;
-                                    margin:.3rem 0;border:1px solid #9ecaad">
-                          <span style="font-family:'Courier New',monospace;font-weight:800;
-                                       color:var(--green);font-size:1rem;white-space:nowrap">{code}</span>
-                          <div>
-                            <div style="font-size:.9rem;color:#1a2e1a">{desc}</div>
-                            {notes_html}
-                          </div>
-                        </div>"""
-
-                    # Check/validation lines
-                    elif line.startswith("✅") or line.startswith("مناسب") or "صحيح" in line or "مكتمل" in line:
-                        clean = line.replace("✅","").strip()
-                        html += (f'<div style="background:#f0faf4;border-right:3px solid #2e7d52;'
-                                 f'padding:.4rem .7rem;border-radius:4px;margin:.25rem 0;'
-                                 f'font-size:.86rem;color:#1a4a2e">{clean}</div>')
-
-                    # Bullet / note lines
-                    elif line.startswith("*") or line.startswith("-") or line.startswith("•"):
-                        clean = line.lstrip("*-•").strip()
-                        html += (f'<div style="padding:.2rem .8rem;font-size:.86rem;'
-                                 f'color:#2a4a2e;border-bottom:1px solid #f0f4f0">'
-                                 f'<span style="color:var(--green);margin-left:.4rem">—</span> {clean}</div>')
-
-                    # Plain text / summary line
+                            notes_html += f'<div style="font-size:.76rem;color:var(--muted);margin-top:2px">— {lines[i].strip().lstrip("*").strip()}</div>'
+                        html += f"""<div style="display:flex;gap:.8rem;align-items:flex-start;padding:.5rem .8rem;
+                                    background:#f0faf4;border-radius:6px;margin:.3rem 0;border:1px solid #9ecaad">
+                          <span style="font-family:'Courier New',monospace;font-weight:800;color:var(--green);
+                                       font-size:.95rem;white-space:nowrap">{code}</span>
+                          <div><div style="font-size:.88rem">{desc}</div>{notes_html}</div></div>"""
+                    elif line.startswith("*") or line.startswith("-"):
+                        html += f'<div style="padding:.18rem .8rem;font-size:.85rem;color:#2a4a2e;border-bottom:1px solid #f0f4f0"><span style="color:var(--green);margin-left:.3rem">—</span> {line.lstrip("*- ").strip()}</div>'
                     else:
-                        html += f'<div style="font-size:.88rem;padding:.3rem 0;color:#1a2e1a">{line}</div>'
-
+                        html += f'<div style="font-size:.86rem;padding:.25rem 0;color:#1a2e1a">{line}</div>'
                     i += 1
                 return html
 
-            rec_html = render_recommendation(ai_rec)
             st.markdown(f"""
             <div class="section-card">
               <div class="section-title">توصية الترميز / AI Coding Recommendation</div>
-              <div style="line-height:1.7">{rec_html}</div>
-            </div>
-            """, unsafe_allow_html=True)
+              <div style="line-height:1.75">{render_rec(ai_rec)}</div>
+            </div>""", unsafe_allow_html=True)
 
-        # ── مرشحو ICD-10 ──────────────────────────────────────────────────
+        # ── Tab 2: ICD candidates ──────────────────────────────────────────
         with tab2:
-            if candidates.get("immediate_cause"):
-                st.markdown("#### السبب الفوري / Immediate Cause")
-                st.caption(candidates["immediate_cause"]["query"])
-                for r in candidates["immediate_cause"]["candidates"]:
+            if cands.get("immediate_cause"):
+                st.markdown("#### السبب الفوري")
+                st.caption(cands["immediate_cause"]["query"])
+                for r in cands["immediate_cause"]["candidates"]:
                     col = "var(--green)" if r["acceptable_main"]=="Acceptable" else "#c0392b"
-                    st.markdown(f"""
-                    <div class="icd-card">
+                    st.markdown(f"""<div class="icd-card">
                       <span class="icd-code">{r['code_formatted']}</span>
                       <span class="icd-badge" style="background:{col}">{r['acceptable_main']}</span>
                       <span class="icd-badge">{r['gender_restriction']}</span>
@@ -844,34 +934,28 @@ elif st.session_state.page == 4:
                       <div class="icd-desc"><strong>{r['short_desc']}</strong></div>
                       <div style="font-size:.8rem;color:#4a6a4e">{r['long_desc']}</div>
                     </div>""", unsafe_allow_html=True)
-
-            if candidates.get("contributing_causes"):
-                st.markdown("#### الأسباب المساهمة / Contributing Causes")
-                for item in candidates["contributing_causes"]:
+            if cands.get("contributing_causes"):
+                st.markdown("#### الأسباب المساهمة")
+                for item in cands["contributing_causes"]:
                     st.markdown(f"**{item['query']}**")
                     for r in item["candidates"]:
-                        st.markdown(f"""
-                        <div class="icd-card" style="border-color:#9ecaad;background:#f2fbf5">
+                        col = "var(--green)" if r["acceptable_main"]=="Acceptable" else "#c0392b"
+                        st.markdown(f"""<div class="icd-card" style="border-color:#9ecaad;background:#f2fbf5">
                           <span class="icd-code" style="color:#2d7a4f">{r['code_formatted']}</span>
-                          <span class="icd-badge">{r['acceptable_main']}</span>
+                          <span class="icd-badge" style="background:{col}">{r['acceptable_main']}</span>
                           <div class="icd-desc"><strong>{r['short_desc']}</strong></div>
                         </div>""", unsafe_allow_html=True)
 
-        # ── معاينة الشهادة ─────────────────────────────────────────────────
+        # ── Tab 3: Certificate ─────────────────────────────────────────────
         with tab3:
             cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id','')[-4:]}"
-
             contrib_rows = "".join(
-                f'<div class="cert-field"><span class="cert-label">(ب/ج) سبب مساهم</span>'
-                f'<span>{c}</span></div>'
+                f'<div class="cert-field"><span class="cert-label">(ب/ج) سبب مساهم</span><span>{c}</span></div>'
                 for c in (concepts.get("contributing_causes") or [])
             )
-            other_row = ""
+            other_cert = ""
             if concepts.get("other_conditions"):
-                other_row = (
-                    f'<div class="cert-field"><span class="cert-label">حالات أخرى</span>'
-                    f'<span>{"; ".join(concepts["other_conditions"])}</span></div>'
-                )
+                other_cert = f'<div class="cert-field"><span class="cert-label">حالات أخرى</span><span>{"؛ ".join(concepts["other_conditions"])}</span></div>'
 
             st.markdown(f"""
             <div class="cert-preview">
@@ -885,17 +969,13 @@ elif st.session_state.page == 4:
                 <div style="text-align:center">
                   <div class="cert-title">شهادة الوفاة</div>
                   <div class="cert-sub">DEATH CERTIFICATE</div>
-                  <div style="background:var(--green);color:white;border-radius:4px;
-                              padding:2px 10px;font-size:.76rem;margin-top:5px;display:inline-block">
-                    رقم: {cert_no}
-                  </div>
+                  <div style="background:var(--green);color:white;border-radius:4px;padding:2px 10px;font-size:.76rem;margin-top:5px;display:inline-block">رقم: {cert_no}</div>
                 </div>
                 <div style="text-align:left">
                   <div style="font-size:.95rem;font-weight:700;color:var(--green)">Kingdom of Saudi Arabia</div>
                   <div style="font-size:.8rem;color:var(--muted)">Ministry of Health</div>
                 </div>
               </div>
-
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin-bottom:1.4rem">
                 <div>
                   <div class="cert-field"><span class="cert-label">الاسم الكامل</span><span>{fd.get('full_name_ar','—')}</span></div>
@@ -914,28 +994,18 @@ elif st.session_state.page == 4:
                   <div class="cert-field"><span class="cert-label">نوع الوفاة</span><span>{fd.get('death_type','—')}</span></div>
                   <div class="cert-field"><span class="cert-label">عملية خلال شهر</span><span>{fd.get('had_surgery','لا')}</span></div>
                   <div class="cert-field"><span class="cert-label">التشريح مطلوب</span><span>{fd.get('autopsy_required','لا')}</span></div>
-                  <div class="cert-field"><span class="cert-label">إقامة بالمستشفى</span><span>{fd.get('inpatient_days',0)} أيام</span></div>
                 </div>
               </div>
-
-              <div style="background:var(--green-light);border-radius:6px;padding:1rem 1.2rem;
-                          margin-bottom:1.4rem;border:1px solid #9ecaad">
-                <div style="font-weight:700;color:var(--green);margin-bottom:.5rem;font-size:.9rem">
-                  أسباب الوفاة / Causes of Death
-                </div>
-                <div class="cert-field">
-                  <span class="cert-label">(أ) السبب الفوري</span>
-                  <span>{concepts.get('immediate_cause', fd.get('cause_a','—'))}</span>
-                </div>
+              <div style="background:var(--green-light);border-radius:6px;padding:1rem 1.2rem;margin-bottom:1.4rem;border:1px solid #9ecaad">
+                <div style="font-weight:700;color:var(--green);margin-bottom:.5rem;font-size:.9rem">أسباب الوفاة / Causes of Death</div>
+                <div class="cert-field"><span class="cert-label">(أ) السبب الفوري</span><span>{concepts.get('immediate_cause', fd.get('cause_a','—'))}</span></div>
                 {contrib_rows}
-                {other_row}
+                {other_cert}
               </div>
-
-              <div style="display:flex;justify-content:space-between;align-items:flex-end;
-                          padding-top:1.2rem;border-top:1px solid #d0ddd2">
+              <div style="display:flex;justify-content:space-between;align-items:flex-end;padding-top:1.2rem;border-top:1px solid #d0ddd2">
                 <div>
                   <div style="font-weight:700;color:var(--green);font-size:.85rem">الطبيب المُصدر</div>
-                  <div style="margin-top:3px">{doctor_name or '________________________________'}</div>
+                  <div style="margin-top:3px">{doctor_name or "________________________________"}</div>
                   <div style="font-size:.75rem;color:#888;margin-top:8px">التوقيع: _______________________</div>
                 </div>
                 <div class="cert-stamp">وزارة<br>الصحة<br>MOH<br>ختم رسمي</div>
@@ -945,24 +1015,18 @@ elif st.session_state.page == 4:
                   <div style="font-size:.75rem;color:#888;margin-top:3px">{hospital_city}</div>
                 </div>
               </div>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
 
             st.markdown("---")
             cert_txt = (
                 f"شهادة وفاة / DEATH CERTIFICATE\nرقم: {cert_no}\n{'='*55}\n"
-                f"المستشفى: {hospital_name} – {hospital_city}\n"
-                f"وزارة الصحة – المملكة العربية السعودية\n\n"
+                f"المستشفى: {hospital_name} – {hospital_city}\nوزارة الصحة – المملكة العربية السعودية\n\n"
                 f"الاسم: {fd.get('full_name_ar','')}\nالهوية: {fd.get('national_id','')}\n"
                 f"الجنس: {fd.get('sex','')}\nالعمر: {fd.get('age_years','')} سنة\n"
-                f"تاريخ الوفاة: {fd.get('dod','')}\nمكان الوفاة: {fd.get('place_of_death','')}\n"
-                f"نوع الوفاة: {fd.get('death_type','')}\n\n"
-                f"عملية آخر شهر: {fd.get('had_surgery','')}\n"
-                f"التشريح مطلوب: {fd.get('autopsy_required','')}\n\n"
-                f"أسباب الوفاة:\n"
-                f"  السبب الفوري: {concepts.get('immediate_cause','')}\n"
-                f"  الأسباب المساهمة: {', '.join(concepts.get('contributing_causes',[]))}\n"
-                f"  حالات أخرى: {', '.join(concepts.get('other_conditions',[]))}\n\n"
+                f"تاريخ الوفاة: {fd.get('dod','')}\nمكان الوفاة: {fd.get('place_of_death','')}\n\n"
+                f"أسباب الوفاة:\n  (أ) {concepts.get('immediate_cause','')}\n"
+                f"  مساهمة: {', '.join(concepts.get('contributing_causes',[]))}\n"
+                f"  أخرى: {', '.join(concepts.get('other_conditions',[]))}\n\n"
                 f"توصية ICD-10:\n{ai_rec}\n\n"
                 f"الطبيب: {doctor_name}\nتاريخ الإصدار: {fd.get('date_issued','')}\n"
             )
