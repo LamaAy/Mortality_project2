@@ -805,44 +805,41 @@ elif st.session_state.page == 4:
                 cause_text = cause_item["cause"]
                 sq_lower   = cause_text.lower()
 
-                # ── A) Semantic search k=15 ───────────────────────────────
+                # ── A) Semantic search k=15 on FAISS ─────────────────────
                 sem_hits = search_icd(df_icd, fidx, cause_text, top_k=15)
 
-                # ── B) Keyword search directly on df_excel ShortDesc+LongDesc ──
+                # ── B) Keyword search on df_icd (metadata.pkl has EmbedText) ──
+                # Use the SAME dataframe the embeddings were built from
                 kw_hits = []
-                if df_excel is not None and "ShortDesc" in df_excel.columns:
-                    kw_terms = [t for t in sq_lower.split() if len(t) > 3]
-                    if kw_terms:
-                        # Use vectorised string ops — fast and correct on DataFrame columns
-                        combined = (
-                            df_excel["ShortDesc"].fillna("").str.lower() + " " +
-                            df_excel["LongDesc"].fillna("").str.lower()
-                        )
-                        scores = sum(combined.str.contains(t, regex=False).astype(int)
-                                     for t in kw_terms)
-                        top_idx = scores.nlargest(10).index
-                        for i in top_idx:
-                            if scores[i] > 0:
-                                r = {k: str(v) for k, v in df_excel.iloc[i].to_dict().items()}
-                                kw_hits.append(r)
+                kw_terms = [t for t in sq_lower.split() if len(t) > 3]
+                if kw_terms and df_icd is not None:
+                    search_df = df_icd
+                    combined = (
+                        search_df.get("ShortDesc", pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower() + " " +
+                        search_df.get("LongDesc",  pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower() + " " +
+                        search_df.get("EmbedText", pd.Series([""] * len(search_df), index=search_df.index)).fillna("").str.lower()
+                    )
+                    kw_scores = sum(
+                        combined.str.contains(t, regex=False).astype(int) for t in kw_terms
+                    )
+                    top_kw = kw_scores.nlargest(10).index
+                    for i in top_kw:
+                        if kw_scores.loc[i] > 0:
+                            kw_hits.append(_row_to_dict(search_df.loc[i], float(kw_scores.loc[i])))
 
-                # ── C) Merge: semantic first, then keyword additions ──────
+                # ── C) Merge semantic + keyword, fetch full Excel rows ────────
                 seen      = set()
                 full_rows = []
-                for h in sem_hits:
-                    code = h.get("code_formatted","")
+                for h in (sem_hits + kw_hits):
+                    code = h.get("code_formatted", "")
                     if code and code not in seen:
                         seen.add(code)
-                        row_data = get_excel_row(df_excel, code)
-                        full_rows.append(row_data if row_data else h)
-                for r in kw_hits:
-                    code = r.get("CodeFormatted","") or r.get("Code","")
-                    if code and code not in seen:
-                        seen.add(code)
-                        full_rows.append(r)
+                        # Try to get full row from Excel (has all fields)
+                        excel_row = get_excel_row(df_excel, code)
+                        full_rows.append(excel_row if excel_row else h)
 
-                # Keep top 10 for Claude (more options = better selection)
-                full_rows = full_rows[:10]
+                # Keep top 12 for Claude
+                full_rows = full_rows[:12]
 
                 s2_user = (
                     "Patient: " + age_str + "yo, " + gender_str + "\n"
