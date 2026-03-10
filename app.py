@@ -355,24 +355,22 @@ def search_icd(df, fidx, query: str, top_k: int = 6) -> list:
         except Exception:
             pass
 
-    # ── Keyword fallback on EmbedText ────────────────────────────────────────
-    # Arabic terms: try matching against ShortDesc and LongDesc directly
+    # ── Keyword fallback — vectorised ────────────────────────────────────────
     q_lower = query.lower().strip()
     terms   = [t for t in q_lower.split() if len(t) > 2]
 
-    # Score against EmbedText (English) + ShortDesc + LongDesc
-    def score_row(row):
-        combined = " ".join([
-            str(row.get("EmbedText","")),
-            str(row.get("ShortDesc","")),
-            str(row.get("LongDesc","")),
-        ]).lower()
-        return sum(t in combined for t in terms)
-
     if terms:
-        sc  = df.apply(score_row, axis=1)
+        empty = pd.Series([""] * len(df), index=df.index)
+        combined = (
+            df["EmbedText"].fillna("").str.lower()  if "EmbedText"  in df.columns else empty
+        ) + " " + (
+            df["ShortDesc"].fillna("").str.lower()  if "ShortDesc"  in df.columns else empty
+        ) + " " + (
+            df["LongDesc"].fillna("").str.lower()   if "LongDesc"   in df.columns else empty
+        )
+        sc  = sum(combined.str.contains(t, regex=False).astype(int) for t in terms)
         top = sc.nlargest(top_k).index
-        hits = [_row_to_dict(df.iloc[i], float(sc[i])) for i in top if sc[i] > 0]
+        hits = [_row_to_dict(df.loc[i], float(sc.loc[i])) for i in top if sc.loc[i] > 0]
         if hits:
             return hits
 
@@ -812,15 +810,16 @@ elif st.session_state.page == 4:
 
                 # ── B) Keyword search directly on df_excel ShortDesc+LongDesc ──
                 kw_hits = []
-                if df_excel is not None:
-                    # extract meaningful words (>3 chars)
+                if df_excel is not None and "ShortDesc" in df_excel.columns:
                     kw_terms = [t for t in sq_lower.split() if len(t) > 3]
                     if kw_terms:
-                        def kw_score(row):
-                            txt = (str(row.get("ShortDesc","")) + " " +
-                                   str(row.get("LongDesc",""))).lower()
-                            return sum(t in txt for t in kw_terms)
-                        scores = df_excel.apply(kw_score, axis=1)
+                        # Use vectorised string ops — fast and correct on DataFrame columns
+                        combined = (
+                            df_excel["ShortDesc"].fillna("").str.lower() + " " +
+                            df_excel["LongDesc"].fillna("").str.lower()
+                        )
+                        scores = sum(combined.str.contains(t, regex=False).astype(int)
+                                     for t in kw_terms)
                         top_idx = scores.nlargest(10).index
                         for i in top_idx:
                             if scores[i] > 0:
