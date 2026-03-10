@@ -15,7 +15,6 @@ No LLMs are used.
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
 import re
 import datetime
 import io
@@ -205,13 +204,12 @@ st.markdown("""
 # =============================================================================
 # Updated Resource IDs
 # =============================================================================
-# From user-provided links
 GDRIVE_EMBEDDINGS_ID = "1CxCGihYnqyaIc-F0IJwHNUTpLRHGmy8Y"
 GDRIVE_FAISS_ID      = "17F5rDFoT3iDbRKKiHCMiSB9ZrH0ecVTP"
 GDRIVE_METADATA_ID   = "1nUUdhivH1XIPGXkvWjrapxzuKfbM445B"
-SHEETS_ID            = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
+GDRIVE_EXCEL_ID      = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_det_cache_v1")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_det_cache_v2")
 EMBED_MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
 
 # =============================================================================
@@ -240,10 +238,7 @@ def specificity_score(code: str) -> int:
     if not code:
         return 0
     code = code.strip().upper()
-    # Prefer more specific ICD codes like K57.20 over K57.2 over K57
-    if "." in code:
-        return len(code.replace(".", ""))
-    return len(code)
+    return len(code.replace(".", ""))
 
 def is_gender_allowed(gender_restriction: str, sex_value: str) -> bool:
     gr = normalize_text_basic(gender_restriction)
@@ -251,12 +246,10 @@ def is_gender_allowed(gender_restriction: str, sex_value: str) -> bool:
 
     if not gr or gr in {"", "none", "n/a", "nan", "unknown"}:
         return True
-
     if "female" in gr and "male" in sx:
         return False
     if "male" in gr and "female" in sx:
         return False
-
     return True
 
 def acceptable_main_bool(x: str) -> Optional[bool]:
@@ -266,13 +259,6 @@ def acceptable_main_bool(x: str) -> Optional[bool]:
     if t in {"not acceptable", "no", "false", "0"}:
         return False
     return None
-
-def extract_drive_file_id(url_or_id: str) -> str:
-    s = (url_or_id or "").strip()
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", s)
-    if m:
-        return m.group(1)
-    return s
 
 # =============================================================================
 # Deterministic dictionaries
@@ -292,8 +278,8 @@ LAY_QUERY_EXPANSIONS = {
     "brain bleed": ["intracranial hemorrhage", "cerebral hemorrhage"],
     "blood clot in lung": ["pulmonary embolism"],
     "cancer spread": ["metastatic malignant neoplasm", "secondary malignant neoplasm"],
-    "septic shock": ["septic shock", "sepsis"],
     "ards": ["acute respiratory distress syndrome"],
+    "acute respiratory distress syndrome": ["ards"],
 }
 
 AMBIGUOUS_TERMS = {
@@ -301,12 +287,12 @@ AMBIGUOUS_TERMS = {
 }
 
 STOPWORDS = {
-    "the", "and", "or", "with", "without", "due", "due to", "secondary", "to", "of", "in",
+    "the", "and", "or", "with", "without", "due", "to", "secondary", "of", "in",
     "acute", "chronic", "history", "known", "generalized", "severe", "mild"
 }
 
 # =============================================================================
-# Cause/interval parsing
+# Cause / interval parsing
 # =============================================================================
 INTERVAL_PATTERNS = [
     r"\(([^()]{1,40})\)",
@@ -331,14 +317,12 @@ def clean_interval(s: str) -> str:
 
 def split_narrative_into_segments(text: str) -> List[str]:
     t = text.replace("\n", " ")
-    # split on strong separators first
     chunks = re.split(r"\s*(?:;|\.|\n)\s*", t)
     final = []
     for ch in chunks:
         ch = ch.strip()
         if not ch:
             continue
-        # then split on "due to" chain
         parts = re.split(r"\b(?:due to|because of|resulting from|caused by|secondary to)\b", ch, flags=re.I)
         parts = [p.strip(" ,.-") for p in parts if p.strip(" ,.-")]
         if len(parts) > 1:
@@ -365,8 +349,8 @@ def classify_segment(seg: str) -> str:
 
 def parse_death_narrative(text: str) -> Dict:
     segments = split_narrative_into_segments(text)
-
     parsed = []
+
     for seg in segments:
         cause, interval = extract_interval_from_segment(seg)
         if cause:
@@ -398,7 +382,7 @@ def parse_death_narrative(text: str) -> Dict:
     }
 
 # =============================================================================
-# Drive download
+# Google Drive download
 # =============================================================================
 def _gdrive_download(file_id: str, dest_path: str) -> None:
     import requests
@@ -445,7 +429,7 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
             df.columns = EXPECTED_COLS
         else:
             raise ValueError(
-                f"Unexpected metadata schema. Expected {len(EXPECTED_COLS)} columns, got {len(df.columns)}."
+                f"Unexpected schema. Expected {len(EXPECTED_COLS)} columns, got {len(df.columns)}."
             )
 
     if "Deleted" in df.columns:
@@ -476,30 +460,28 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.reset_index(drop=True)
 
+@st.cache_resource(show_spinner="Loading Excel from Google Drive...")
+def load_excel_from_drive_file(file_id: str) -> pd.DataFrame:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    xlsx_path = os.path.join(CACHE_DIR, "icd_source.xlsx")
+
+    if not os.path.exists(xlsx_path):
+        _gdrive_download(file_id, xlsx_path)
+
+    df = pd.read_excel(xlsx_path)
+    return _normalise_df(df)
+
 @st.cache_resource(show_spinner="Loading metadata...")
 def load_metadata(metadata_id: str) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
     meta_path = os.path.join(CACHE_DIR, "metadata.pkl")
+
     if not os.path.exists(meta_path):
         _gdrive_download(metadata_id, meta_path)
 
     with open(meta_path, "rb") as f:
         df = pickle.load(f)
-    return _normalise_df(df)
 
-@st.cache_resource(show_spinner="Loading Excel from Google Sheets...")
-def load_excel_sheets(sheet_id: str) -> pd.DataFrame:
-    import requests
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-    resp = requests.get(url, timeout=120)
-    resp.raise_for_status()
-
-    df = pd.read_excel(io.BytesIO(resp.content))
-    if "CodeFormatted" not in df.columns:
-        if len(df.columns) == len(EXPECTED_COLS):
-            df.columns = EXPECTED_COLS
-        else:
-            raise ValueError(f"Unexpected Excel schema. Got {len(df.columns)} columns.")
     return _normalise_df(df)
 
 @st.cache_resource(show_spinner="Building BM25 index...")
@@ -517,19 +499,20 @@ def get_embed_model():
     return SentenceTransformer(EMBED_MODEL_NAME)
 
 @st.cache_resource(show_spinner="Loading FAISS resources...")
-def load_faiss_resources(emb_id: str, faiss_id: str, metadata_id: str):
+def load_faiss_resources(emb_id: str, faiss_id: str):
     """
     Tries in this order:
-    1) load prebuilt FAISS index from downloaded file
-    2) otherwise build FAISS from embeddings.npy
+    1) Load a prebuilt FAISS index from Drive
+    2) Otherwise build FAISS from embeddings.npy
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
     emb_path = os.path.join(CACHE_DIR, "embeddings.npy")
     faiss_path = os.path.join(CACHE_DIR, "icd.index")
-    meta_path = os.path.join(CACHE_DIR, "metadata.pkl")
 
-    if not os.path.exists(meta_path):
-        _gdrive_download(metadata_id, meta_path)
+    try:
+        import faiss
+    except Exception:
+        return None
 
     if faiss_id and not os.path.exists(faiss_path):
         try:
@@ -537,29 +520,27 @@ def load_faiss_resources(emb_id: str, faiss_id: str, metadata_id: str):
         except Exception:
             pass
 
-    try:
-        import faiss
-    except Exception:
-        return None
-
-    # Try reading prebuilt index
     if os.path.exists(faiss_path):
         try:
             return faiss.read_index(faiss_path)
         except Exception:
             pass
 
-    # Fallback: build from embeddings
     if emb_id and not os.path.exists(emb_path):
-        _gdrive_download(emb_id, emb_path)
+        try:
+            _gdrive_download(emb_id, emb_path)
+        except Exception:
+            pass
 
     if os.path.exists(emb_path):
-        emb = np.load(emb_path).astype("float32")
-        # ensure cosine-compatible
-        faiss.normalize_L2(emb)
-        index = faiss.IndexFlatIP(emb.shape[1])
-        index.add(emb)
-        return index
+        try:
+            emb = np.load(emb_path).astype("float32")
+            faiss.normalize_L2(emb)
+            index = faiss.IndexFlatIP(emb.shape[1])
+            index.add(emb)
+            return index
+        except Exception:
+            return None
 
     return None
 
@@ -599,6 +580,14 @@ def detect_ambiguous_query(query: str) -> bool:
     q = normalize_text_basic(query)
     return q in AMBIGUOUS_TERMS or len(tokenize(q)) <= 1
 
+def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
+    q = query.strip().upper().replace(" ", "")
+    if re.fullmatch(r"[A-TV-Z][0-9][0-9](?:\.[0-9A-Z]+)?", q):
+        mask = df["lookup_code"] == q
+        hits = df.index[mask].tolist()
+        return [(int(i), 1.0) for i in hits]
+    return []
+
 def semantic_search(df: pd.DataFrame, faiss_index, query: str, top_k: int = 40) -> List[Tuple[int, float]]:
     if faiss_index is None:
         return []
@@ -630,7 +619,6 @@ def bm25_search(df: pd.DataFrame, bm25, query: str, top_k: int = 40) -> List[Tup
         except Exception:
             pass
 
-    # fallback keyword overlap
     scored = []
     tokset = set([t for t in toks if t not in STOPWORDS])
     for i, txt in enumerate(df["combined_text"].tolist()):
@@ -641,14 +629,6 @@ def bm25_search(df: pd.DataFrame, bm25, query: str, top_k: int = 40) -> List[Tup
     scored = sorted(scored, key=lambda x: x[1], reverse=True)[:top_k]
     mx = scored[0][1] if scored else 1.0
     return [(i, s / (mx + 1e-9)) for i, s in scored]
-
-def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
-    q = query.strip().upper().replace(" ", "")
-    if re.fullmatch(r"[A-TV-Z][0-9][0-9](?:\.[0-9A-Z]+)?", q):
-        mask = df["lookup_code"] == q
-        hits = df.index[mask].tolist()
-        return [(int(i), 1.0) for i in hits]
-    return []
 
 def reciprocal_rank_fusion(rank_lists: List[List[Tuple[int, float]]], k: int = 60) -> Dict[int, float]:
     fused = {}
@@ -663,16 +643,14 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
 
     q = normalize_text_basic(query)
     text = normalize_text_basic(row["combined_text"])
-    code = row["CodeFormatted"]
+    code = str(row["CodeFormatted"])
     acc = acceptable_main_bool(row["AcceptableMain"])
     gender_ok = is_gender_allowed(row["GenderRestriction"], sex_value)
 
-    # exact phrase / containment
     if q and q in text:
         score += 3.0
         reasons.append("query phrase found in ICD text")
 
-    # token overlap
     q_tokens = [t for t in tokenize(q) if t not in STOPWORDS]
     row_tokens = set(tokenize(text))
     overlap = len(set(q_tokens) & row_tokens)
@@ -680,12 +658,10 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
     if overlap:
         reasons.append(f"token overlap={overlap}")
 
-    # specificity
     spec = specificity_score(code)
     score += spec * 0.03
     reasons.append(f"specificity={spec}")
 
-    # prefer acceptable main for Part I
     if role in {"immediate", "contributing"}:
         if acc is True:
             score += 0.5
@@ -694,12 +670,11 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             score -= 0.8
             reasons.append("not acceptable as main cause")
 
-    # gender restriction
     if not gender_ok:
         score -= 3.0
         reasons.append("gender restriction conflict")
 
-    # safer septic shock handling
+    # Safer septic shock handling: only when explicitly septic shock
     if "septic shock" in q:
         if code.upper().startswith("R57.2"):
             score += 1.0
@@ -708,7 +683,6 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             score -= 2.5
             reasons.append("postprocedural septic shock penalized")
 
-    # diabetes type handling
     d_hint = diabetes_type_hint(q)
     if d_hint == "type2":
         if code.upper().startswith("E11"):
@@ -725,7 +699,6 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             score -= 1.2
             reasons.append("type 2 diabetes penalized")
 
-    # ambiguous term penalty
     if detect_ambiguous_query(q) and overlap < 2:
         score -= 0.7
         reasons.append("ambiguous query")
@@ -758,7 +731,6 @@ def search_icd_candidates(
 
     candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
 
-    # deduplicate by code
     seen = set()
     unique = []
     for c in candidates:
@@ -797,7 +769,6 @@ def choose_best_candidate(cands: List[Dict], role: str) -> Dict:
 
     best = cands[0].copy()
 
-    # minimum confidence logic
     if best["score"] < 0.15:
         best["selection_status"] = "manual_review"
         best["selection_notes"] = "Low-confidence retrieval. Manual review required."
@@ -831,33 +802,27 @@ def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
     issues = []
 
     part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
-    part2 = [x for x in coded_causes if x["role"] == "other"]
 
-    # order check
     if not part1:
         issues.append("Part I is empty.")
     else:
         if part1[0]["role"] != "immediate":
             issues.append("Part I should start with an immediate cause.")
 
-    # main acceptability
     for x in part1:
         acc = acceptable_main_bool(x.get("acceptable_main", ""))
         if acc is False:
             issues.append(f"{x.get('code_formatted', 'Unknown code')} is marked as not acceptable as a main cause.")
 
-    # gender restrictions
     for x in coded_causes:
         if not is_gender_allowed(x.get("gender_restriction", ""), sex_value):
             issues.append(f"{x.get('code_formatted', 'Unknown code')} conflicts with sex-based restriction.")
 
-    # ill-defined R chapter in Part I
     for x in part1:
         code = x.get("code_formatted", "")
         if is_r_chapter(code) and not (code.startswith("R57") or code.startswith("R65")):
-            issues.append(f"{code} is an ill-defined R-chapter code in Part I and should be avoided if a specific cause is available.")
+            issues.append(f"{code} is an ill-defined R-chapter code in Part I and should be avoided if a more specific cause is available.")
 
-    # manual review flags
     for x in coded_causes:
         if x.get("selection_status") == "manual_review":
             issues.append(f"{x.get('cause', 'Cause')} requires manual review.")
@@ -894,8 +859,8 @@ def code_causes_from_narrative(
     sex_value: str,
 ) -> Dict:
     concepts = parse_death_narrative(narrative)
-
     coded_causes = []
+
     immediate = concepts.get("immediate_cause", "").strip()
     if immediate:
         cands = search_icd_candidates(df_source, faiss_index, bm25, immediate, sex_value, role="immediate", top_k=10)
@@ -1016,7 +981,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         '<div style="font-size:.72rem;opacity:.65;text-align:center;line-height:2">'
-        'Ministry of Health<br>Deterministic ICD-10 Coding v1</div>',
+        'Ministry of Health<br>Deterministic ICD-10 Coding v2</div>',
         unsafe_allow_html=True,
     )
 
@@ -1037,31 +1002,53 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # =============================================================================
-# Auto-load resources
+# Safe auto-load resources
 # =============================================================================
 if st.session_state["df_source"] is None:
+    df_excel = None
+    df_meta = None
+    faiss_index = None
+    bm25 = None
+    load_errors = []
+
     try:
-        df_excel = load_excel_sheets(SHEETS_ID)
-        df_meta = load_metadata(GDRIVE_METADATA_ID)
-        faiss_index = load_faiss_resources(GDRIVE_EMBEDDINGS_ID, GDRIVE_FAISS_ID, GDRIVE_METADATA_ID)
-        bm25 = build_bm25_index(df_excel)
-
+        df_excel = load_excel_from_drive_file(GDRIVE_EXCEL_ID)
         st.session_state["df_source"] = df_excel
-        st.session_state["df_metadata"] = df_meta
-        st.session_state["faiss_index"] = faiss_index
-        st.session_state["bm25_index"] = bm25
-
         st.sidebar.success(f"Loaded {len(df_excel):,} ICD rows from Excel.")
+    except Exception as e:
+        load_errors.append(f"Excel load failed: {e}")
+
+    try:
+        df_meta = load_metadata(GDRIVE_METADATA_ID)
+        st.session_state["df_metadata"] = df_meta
+        st.sidebar.success(f"Loaded {len(df_meta):,} metadata rows.")
+    except Exception as e:
+        load_errors.append(f"Metadata load failed: {e}")
+
+    try:
+        faiss_index = load_faiss_resources(GDRIVE_EMBEDDINGS_ID, GDRIVE_FAISS_ID)
+        st.session_state["faiss_index"] = faiss_index
         if faiss_index is not None:
             st.sidebar.success("FAISS ready.")
         else:
-            st.sidebar.warning("FAISS unavailable. Keyword retrieval will still work.")
-        if bm25 is not None:
-            st.sidebar.success("BM25 ready.")
-        else:
-            st.sidebar.warning("BM25 unavailable. Using fallback keyword overlap.")
+            st.sidebar.warning("FAISS unavailable. Semantic search disabled.")
     except Exception as e:
-        st.sidebar.error(f"Failed to load ICD resources: {e}")
+        load_errors.append(f"FAISS load failed: {e}")
+
+    try:
+        if df_excel is not None:
+            bm25 = build_bm25_index(df_excel)
+            st.session_state["bm25_index"] = bm25
+            if bm25 is not None:
+                st.sidebar.success("BM25 ready.")
+            else:
+                st.sidebar.warning("BM25 unavailable. Using fallback keyword overlap.")
+    except Exception as e:
+        load_errors.append(f"BM25 load failed: {e}")
+
+    if load_errors:
+        for err in load_errors:
+            st.sidebar.error(err)
 
 # =============================================================================
 # Step bar
@@ -1217,7 +1204,6 @@ elif st.session_state.page == 3:
         '<div style="background:#fffbe6;border-left:3px solid #C8A951;padding:9px 14px;'
         'border-radius:5px;margin-bottom:1.1rem;font-size:.87rem;color:#5a4a00">'
         'Write a single paragraph in plain language or medical language. '
-        'The app will parse the direct causal chain and time intervals deterministically. '
         'For best results, write the immediate cause first, then the underlying sequence, then other significant conditions.</div>',
         unsafe_allow_html=True
     )
@@ -1244,7 +1230,7 @@ elif st.session_state.page == 3:
             if not free_text.strip():
                 st.error("Please enter a narrative description.")
             elif st.session_state.df_source is None:
-                st.error("ICD source data has not finished loading.")
+                st.error("ICD source data failed to load. Check the sidebar error messages.")
             else:
                 st.session_state.form_data["free_text"] = free_text
                 st.session_state.icd_results = None
@@ -1262,7 +1248,7 @@ elif st.session_state.page == 4:
     bm25 = st.session_state.bm25_index
 
     if df_source is None:
-        st.error("ICD source data is unavailable.")
+        st.error("ICD source data is unavailable. Please check sidebar loading errors and reload ICD data.")
         if st.button("Back"):
             st.session_state.page = 3
             st.rerun()
@@ -1574,7 +1560,6 @@ elif st.session_state.page == 4:
             st.rerun()
     with b2:
         if st.button("New Certificate", use_container_width=True):
-            # keep ICD resources loaded, reset only workflow state
             keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
             for k in keys_to_remove:
                 del st.session_state[k]
