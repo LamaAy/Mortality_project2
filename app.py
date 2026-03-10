@@ -17,7 +17,6 @@ import pandas as pd
 import numpy as np
 import re
 import datetime
-import io
 import os
 import pickle
 import html
@@ -202,14 +201,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# Updated Resource IDs
+# Resource IDs
 # =============================================================================
 GDRIVE_EMBEDDINGS_ID = "1CxCGihYnqyaIc-F0IJwHNUTpLRHGmy8Y"
 GDRIVE_FAISS_ID      = "17F5rDFoT3iDbRKKiHCMiSB9ZrH0ecVTP"
 GDRIVE_METADATA_ID   = "1nUUdhivH1XIPGXkvWjrapxzuKfbM445B"
 GDRIVE_EXCEL_ID      = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_det_cache_v2")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_det_cache_v3")
 EMBED_MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
 
 # =============================================================================
@@ -237,13 +236,15 @@ def tokenize(text: str) -> List[str]:
 def specificity_score(code: str) -> int:
     if not code:
         return 0
-    code = code.strip().upper()
-    return len(code.replace(".", ""))
+    return len(str(code).strip().upper().replace(".", ""))
+
+def code_chapter_letter(code: str) -> str:
+    c = (code or "").strip().upper()
+    return c[:1] if c else ""
 
 def is_gender_allowed(gender_restriction: str, sex_value: str) -> bool:
     gr = normalize_text_basic(gender_restriction)
     sx = normalize_text_basic(sex_value)
-
     if not gr or gr in {"", "none", "n/a", "nan", "unknown"}:
         return True
     if "female" in gr and "male" in sx:
@@ -280,6 +281,8 @@ LAY_QUERY_EXPANSIONS = {
     "cancer spread": ["metastatic malignant neoplasm", "secondary malignant neoplasm"],
     "ards": ["acute respiratory distress syndrome"],
     "acute respiratory distress syndrome": ["ards"],
+    "peritonitis": ["generalized peritonitis"],
+    "diverticulitis": ["sigmoid diverticulitis", "diverticulitis of large intestine"],
 }
 
 AMBIGUOUS_TERMS = {
@@ -288,57 +291,125 @@ AMBIGUOUS_TERMS = {
 
 STOPWORDS = {
     "the", "and", "or", "with", "without", "due", "to", "secondary", "of", "in",
-    "acute", "chronic", "history", "known", "generalized", "severe", "mild"
+    "acute", "chronic", "history", "known", "generalized", "severe", "mild",
+    "patient", "died", "from", "which", "developed", "resulted", "occurred",
+    "context", "background", "approximately", "about", "prior", "before", "after",
+    "complication", "condition", "lasting", "present", "nearly", "itself"
 }
 
-# =============================================================================
-# Cause / interval parsing
-# =============================================================================
-INTERVAL_PATTERNS = [
-    r"\(([^()]{1,40})\)",
-    r"\bfor\s+([a-z0-9\-\s]{1,40})\b",
-    r"\bover\s+([a-z0-9\-\s]{1,40})\b",
-    r"\blasting\s+([a-z0-9\-\s]{1,40})\b",
-    r"\bpresent\s+for\s+([a-z0-9\-\s]{1,40})\b",
+CLINICAL_HEAD_PHRASES = [
+    r"^the patient died from\s+",
+    r"^the patient died of\s+",
+    r"^death resulted from\s+",
+    r"^died from\s+",
+    r"^died of\s+",
+    r"^because of\s+",
+    r"^as a complication of\s+",
+    r"^complication of\s+",
+    r"^resulted from\s+",
+    r"^occurred in the context of\s+",
+    r"^in the context of\s+",
+    r"^developed on the background of\s+",
+    r"^on the background of\s+",
 ]
 
-OTHER_CONDITION_HINTS = [
-    "diabetes", "hypertension", "obesity", "metabolic syndrome", "dementia",
-    "chronic kidney disease", "coronary artery disease", "copd", "cancer",
-    "renal disease", "liver disease"
+NON_CAUSE_LEADINS = [
+    "which developed",
+    "which had progressed",
+    "a condition that had progressed",
+    "this gastrointestinal complication occurred",
+    "the diabetes itself developed",
 ]
 
-def clean_interval(s: str) -> str:
-    if not s:
-        return "—"
-    s = s.strip(" .;:,")
-    s = re.sub(r"\s+", " ", s)
-    return s if s else "—"
+INTERVAL_WORDS = [
+    "day", "days", "week", "weeks", "month", "months", "year", "years",
+    "hour", "hours", "minute", "minutes"
+]
+
+# =============================================================================
+# Cause parsing
+# =============================================================================
+def strip_head_phrases(text: str) -> str:
+    s = text.strip(" ,.;:-")
+    changed = True
+    while changed:
+        changed = False
+        for pat in CLINICAL_HEAD_PHRASES:
+            new_s = re.sub(pat, "", s, flags=re.I).strip(" ,.;:-")
+            if new_s != s:
+                s = new_s
+                changed = True
+    return s
+
+def extract_first_interval(text: str) -> Tuple[str, str]:
+    """
+    Returns cleaned_text, interval
+    Captures:
+    - (2 days)
+    - over two days
+    - lasting approximately five days
+    - present for twelve years
+    """
+    s = text
+
+    # Parentheses intervals
+    m = re.search(r"\(([^()]{1,40})\)", s)
+    if m:
+        candidate = m.group(1).strip()
+        if any(w in candidate.lower() for w in INTERVAL_WORDS):
+            cleaned = re.sub(r"\(([^()]{1,40})\)", "", s, count=1).strip(" ,.;:-")
+            return cleaned, candidate
+
+    # phrase intervals
+    patterns = [
+        r"\bover\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\blasting\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\bpresent\s+for\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\bfor\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\bapproximately\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\babout\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+        r"\bnearly\s+([a-z0-9\-\s]{1,40}(?:days?|weeks?|months?|years?|hours?|minutes?))\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s, flags=re.I)
+        if m:
+            interval = m.group(1).strip()
+            cleaned = re.sub(pat, "", s, count=1, flags=re.I).strip(" ,.;:-")
+            return cleaned, interval
+
+    return s.strip(" ,.;:-"), "—"
+
+def clean_cause_phrase(text: str) -> str:
+    s = normalize_text_basic(text)
+    s = strip_head_phrases(s)
+
+    for lead in NON_CAUSE_LEADINS:
+        s = s.replace(lead, " ")
+
+    # remove relative narrative tails
+    s = re.sub(r"\bwhich\b.*$", "", s).strip(" ,.;:-")
+    s = re.sub(r"\ba condition that\b.*$", "", s).strip(" ,.;:-")
+    s = re.sub(r"\bthis\b.*$", "", s).strip(" ,.;:-")
+
+    # collapse spaces
+    s = re.sub(r"\s+", " ", s).strip(" ,.;:-")
+
+    # If there is comma text, keep left side first because usually disease term is earlier
+    if "," in s:
+        left = s.split(",", 1)[0].strip()
+        if len(left) >= 4:
+            s = left
+
+    return s
 
 def split_narrative_into_segments(text: str) -> List[str]:
-    t = text.replace("\n", " ")
-    chunks = re.split(r"\s*(?:;|\.|\n)\s*", t)
-    final = []
-    for ch in chunks:
-        ch = ch.strip()
-        if not ch:
-            continue
-        parts = re.split(r"\b(?:due to|because of|resulting from|caused by|secondary to)\b", ch, flags=re.I)
-        parts = [p.strip(" ,.-") for p in parts if p.strip(" ,.-")]
-        if len(parts) > 1:
-            final.extend(parts)
-        else:
-            final.append(ch)
-    return [x for x in final if x]
+    t = text.replace("\n", " ").strip()
+    t = re.sub(r"\s+", " ", t)
 
-def extract_interval_from_segment(seg: str) -> Tuple[str, str]:
-    for pat in INTERVAL_PATTERNS:
-        m = re.search(pat, seg, flags=re.I)
-        if m:
-            interval = clean_interval(m.group(1))
-            cleaned = re.sub(pat, "", seg, flags=re.I).strip(" ,.-")
-            return cleaned, interval
-    return seg.strip(" ,.-"), "—"
+    # Split direct causal links
+    parts = re.split(r"\b(?:due to|because of|resulting from|caused by|secondary to)\b", t, flags=re.I)
+    parts = [p.strip(" ,.;:-") for p in parts if p.strip(" ,.;:-")]
+    return parts
 
 def classify_segment(seg: str) -> str:
     s = normalize_text_basic(seg)
@@ -347,12 +418,19 @@ def classify_segment(seg: str) -> str:
             return "other"
     return "chain"
 
+OTHER_CONDITION_HINTS = [
+    "diabetes", "hypertension", "obesity", "metabolic syndrome", "dementia",
+    "chronic kidney disease", "coronary artery disease", "copd", "cancer",
+    "renal disease", "liver disease", "vasculopathy"
+]
+
 def parse_death_narrative(text: str) -> Dict:
-    segments = split_narrative_into_segments(text)
+    raw_segments = split_narrative_into_segments(text)
     parsed = []
 
-    for seg in segments:
-        cause, interval = extract_interval_from_segment(seg)
+    for seg in raw_segments:
+        cleaned, interval = extract_first_interval(seg)
+        cause = clean_cause_phrase(cleaned)
         if cause:
             parsed.append({
                 "raw": seg,
@@ -361,28 +439,48 @@ def parse_death_narrative(text: str) -> Dict:
                 "kind": classify_segment(cause),
             })
 
-    chain = [x for x in parsed if x["kind"] == "chain"]
-    others = [x for x in parsed if x["kind"] == "other"]
+    # Post-process: first 1-3 segments are usually causal chain
+    chain = []
+    others = []
+    for i, x in enumerate(parsed):
+        if i < 3:
+            chain.append(x)
+        else:
+            if x["kind"] == "other":
+                others.append(x)
+            else:
+                chain.append(x)
 
     immediate = chain[0]["cause"] if len(chain) >= 1 else ""
     immediate_interval = chain[0]["interval"] if len(chain) >= 1 else "—"
     contributing = [x["cause"] for x in chain[1:]]
     contributing_intervals = [x["interval"] for x in chain[1:]]
 
+    # if chain items clearly include chronic conditions, move them to Part II
+    fixed_contrib = []
+    fixed_contrib_intervals = []
+    for c, iv in zip(contributing, contributing_intervals):
+        lc = normalize_text_basic(c)
+        if any(h in lc for h in OTHER_CONDITION_HINTS):
+            others.append({"cause": c, "interval": iv, "kind": "other", "raw": c})
+        else:
+            fixed_contrib.append(c)
+            fixed_contrib_intervals.append(iv)
+
     return {
         "immediate_cause": immediate,
-        "contributing_causes": contributing,
+        "contributing_causes": fixed_contrib,
         "other_conditions": [x["cause"] for x in others],
         "intervals": {
             "immediate_cause": immediate_interval,
-            "contributing_causes": contributing_intervals,
+            "contributing_causes": fixed_contrib_intervals,
             "other_conditions": [x["interval"] for x in others],
         },
         "segments_debug": parsed,
     }
 
 # =============================================================================
-# Google Drive download
+# Download
 # =============================================================================
 def _gdrive_download(file_id: str, dest_path: str) -> None:
     import requests
@@ -428,9 +526,7 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
         if len(df.columns) == len(EXPECTED_COLS):
             df.columns = EXPECTED_COLS
         else:
-            raise ValueError(
-                f"Unexpected schema. Expected {len(EXPECTED_COLS)} columns, got {len(df.columns)}."
-            )
+            raise ValueError(f"Unexpected schema. Expected {len(EXPECTED_COLS)} columns, got {len(df.columns)}.")
 
     if "Deleted" in df.columns:
         df = df[df["Deleted"].astype(str).str.strip().str.lower() != "yes"].copy()
@@ -462,26 +558,19 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner="Loading Excel from Google Drive...")
 def load_excel_from_drive_file(file_id: str) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
     xlsx_path = os.path.join(CACHE_DIR, "icd_source.xlsx")
-
     if not os.path.exists(xlsx_path):
         _gdrive_download(file_id, xlsx_path)
-
     df = pd.read_excel(xlsx_path)
     return _normalise_df(df)
 
 @st.cache_resource(show_spinner="Loading metadata...")
 def load_metadata(metadata_id: str) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
     meta_path = os.path.join(CACHE_DIR, "metadata.pkl")
-
     if not os.path.exists(meta_path):
         _gdrive_download(metadata_id, meta_path)
-
     with open(meta_path, "rb") as f:
         df = pickle.load(f)
-
     return _normalise_df(df)
 
 @st.cache_resource(show_spinner="Building BM25 index...")
@@ -500,11 +589,6 @@ def get_embed_model():
 
 @st.cache_resource(show_spinner="Loading FAISS resources...")
 def load_faiss_resources(emb_id: str, faiss_id: str):
-    """
-    Tries in this order:
-    1) Load a prebuilt FAISS index from Drive
-    2) Otherwise build FAISS from embeddings.npy
-    """
     os.makedirs(CACHE_DIR, exist_ok=True)
     emb_path = os.path.join(CACHE_DIR, "embeddings.npy")
     faiss_path = os.path.join(CACHE_DIR, "icd.index")
@@ -545,7 +629,7 @@ def load_faiss_resources(emb_id: str, faiss_id: str):
     return None
 
 # =============================================================================
-# Search and candidate selection
+# Search
 # =============================================================================
 def row_to_dict(row, score: float = 0.0) -> Dict:
     return {
@@ -580,6 +664,14 @@ def detect_ambiguous_query(query: str) -> bool:
     q = normalize_text_basic(query)
     return q in AMBIGUOUS_TERMS or len(tokenize(q)) <= 1
 
+def query_indicates_external_cause(query: str) -> bool:
+    q = normalize_text_basic(query)
+    triggers = [
+        "accident", "injury", "collision", "fall", "burn", "poisoning", "vehicle",
+        "atv", "road traffic", "assault", "homicide", "suicide", "gunshot", "stab"
+    ]
+    return any(t in q for t in triggers)
+
 def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
     q = query.strip().upper().replace(" ", "")
     if re.fullmatch(r"[A-TV-Z][0-9][0-9](?:\.[0-9A-Z]+)?", q):
@@ -591,16 +683,11 @@ def exact_code_search(df: pd.DataFrame, query: str) -> List[Tuple[int, float]]:
 def semantic_search(df: pd.DataFrame, faiss_index, query: str, top_k: int = 40) -> List[Tuple[int, float]]:
     if faiss_index is None:
         return []
-
     try:
         model = get_embed_model()
         q_vec = model.encode([expand_query(query)], normalize_embeddings=True, convert_to_numpy=True).astype("float32")
         scores, indices = faiss_index.search(q_vec, top_k)
-        out = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx != -1 and 0 <= idx < len(df):
-                out.append((int(idx), float(score)))
-        return out
+        return [(int(idx), float(score)) for score, idx in zip(scores[0], indices[0]) if idx != -1 and 0 <= idx < len(df)]
     except Exception:
         return []
 
@@ -643,65 +730,104 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
 
     q = normalize_text_basic(query)
     text = normalize_text_basic(row["combined_text"])
-    code = str(row["CodeFormatted"])
+    code = str(row["CodeFormatted"]).upper()
     acc = acceptable_main_bool(row["AcceptableMain"])
     gender_ok = is_gender_allowed(row["GenderRestriction"], sex_value)
 
     if q and q in text:
-        score += 3.0
+        score += 4.0
         reasons.append("query phrase found in ICD text")
 
     q_tokens = [t for t in tokenize(q) if t not in STOPWORDS]
     row_tokens = set(tokenize(text))
     overlap = len(set(q_tokens) & row_tokens)
-    score += min(overlap, 6) * 0.35
+    score += min(overlap, 8) * 0.5
     if overlap:
         reasons.append(f"token overlap={overlap}")
 
     spec = specificity_score(code)
     score += spec * 0.03
-    reasons.append(f"specificity={spec}")
 
     if role in {"immediate", "contributing"}:
         if acc is True:
-            score += 0.5
-            reasons.append("acceptable as main cause")
+            score += 0.7
         elif acc is False:
-            score -= 0.8
+            score -= 1.0
             reasons.append("not acceptable as main cause")
 
     if not gender_ok:
         score -= 3.0
         reasons.append("gender restriction conflict")
 
-    # Safer septic shock handling: only when explicitly septic shock
+    # strongly penalize external causes unless query is clearly injury-related
+    if code[:1] in {"V", "W", "X", "Y"} and not query_indicates_external_cause(q):
+        score -= 6.0
+        reasons.append("external cause chapter penalized")
+
+    # penalize obvious procedure / device / misadventure matches for natural disease text
+    if code.startswith("Y") and not query_indicates_external_cause(q):
+        score -= 4.0
+        reasons.append("procedure/misadventure code penalized")
+
+    # ARDS
+    if "acute respiratory distress syndrome" in q or re.fullmatch(r"ards", q):
+        if code.startswith("J80"):
+            score += 3.0
+            reasons.append("preferred ARDS code")
+        if code.startswith(("Y", "V", "W", "X")):
+            score -= 5.0
+
+    # septic shock
     if "septic shock" in q:
-        if code.upper().startswith("R57.2"):
-            score += 1.0
+        if code.startswith("R57.2"):
+            score += 3.0
             reasons.append("preferred septic shock code")
-        if code.upper().startswith("T81.12"):
-            score -= 2.5
+        if code.startswith("T81.12"):
+            score -= 3.0
             reasons.append("postprocedural septic shock penalized")
+
+    # peritonitis
+    if "peritonitis" in q and code.startswith("K65"):
+        score += 2.5
+        reasons.append("preferred peritonitis code")
+
+    # diverticulitis
+    if "diverticulitis" in q:
+        if code.startswith("K57"):
+            score += 3.0
+            reasons.append("preferred diverticulitis code")
 
     d_hint = diabetes_type_hint(q)
     if d_hint == "type2":
-        if code.upper().startswith("E11"):
-            score += 1.0
+        if code.startswith("E11"):
+            score += 2.0
             reasons.append("matches type 2 diabetes")
-        if code.upper().startswith("E10"):
-            score -= 1.2
+        if code.startswith("E10"):
+            score -= 2.0
             reasons.append("type 1 diabetes penalized")
     elif d_hint == "type1":
-        if code.upper().startswith("E10"):
-            score += 1.0
+        if code.startswith("E10"):
+            score += 2.0
             reasons.append("matches type 1 diabetes")
-        if code.upper().startswith("E11"):
-            score -= 1.2
+        if code.startswith("E11"):
+            score -= 2.0
             reasons.append("type 2 diabetes penalized")
+
+    if "obesity" in q and code.startswith("E66"):
+        score += 2.5
+        reasons.append("preferred obesity code")
+
+    if "metabolic syndrome" in q and code.startswith(("E88.81", "E88")):
+        score += 2.5
+        reasons.append("preferred metabolic syndrome code")
+
+    if "vasculopathy" in q or "angiopathy" in q:
+        if code.startswith("E11.5"):
+            score += 2.0
+            reasons.append("preferred diabetic angiopathy family")
 
     if detect_ambiguous_query(q) and overlap < 2:
         score -= 0.7
-        reasons.append("ambiguous query")
 
     return score, reasons
 
@@ -715,8 +841,8 @@ def search_icd_candidates(
     top_k: int = 12
 ) -> List[Dict]:
     exact_hits = exact_code_search(df, query)
-    sem_hits = semantic_search(df, faiss_index, query, top_k=40)
-    bm_hits = bm25_search(df, bm25, query, top_k=40)
+    sem_hits = semantic_search(df, faiss_index, query, top_k=50)
+    bm_hits = bm25_search(df, bm25, query, top_k=50)
 
     fused = reciprocal_rank_fusion([exact_hits, sem_hits, bm_hits], k=60)
 
@@ -740,7 +866,6 @@ def search_icd_candidates(
             unique.append(c)
         if len(unique) >= top_k:
             break
-
     return unique
 
 def get_row_by_code(df: pd.DataFrame, code_str: str) -> Optional[pd.Series]:
@@ -769,7 +894,7 @@ def choose_best_candidate(cands: List[Dict], role: str) -> Dict:
 
     best = cands[0].copy()
 
-    if best["score"] < 0.15:
+    if best["score"] < 0.4:
         best["selection_status"] = "manual_review"
         best["selection_notes"] = "Low-confidence retrieval. Manual review required."
         return best
@@ -795,8 +920,7 @@ def choose_best_candidate(cands: List[Dict], role: str) -> Dict:
 # Validation
 # =============================================================================
 def is_r_chapter(code: str) -> bool:
-    code = (code or "").strip().upper()
-    return code.startswith("R")
+    return (code or "").strip().upper().startswith("R")
 
 def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
     issues = []
@@ -820,8 +944,22 @@ def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
 
     for x in part1:
         code = x.get("code_formatted", "")
+        cause = normalize_text_basic(x.get("cause", ""))
+
         if is_r_chapter(code) and not (code.startswith("R57") or code.startswith("R65")):
             issues.append(f"{code} is an ill-defined R-chapter code in Part I and should be avoided if a more specific cause is available.")
+
+        if code[:1] in {"V", "W", "X", "Y"} and not query_indicates_external_cause(cause):
+            issues.append(f"{code} is an external-cause/procedure code that does not fit a natural disease phrase.")
+
+        if "respiratory distress syndrome" in cause and not code.startswith("J80"):
+            issues.append(f"{code} does not match ARDS well; expected J80 family.")
+        if "septic shock" in cause and not code.startswith("R57.2"):
+            issues.append(f"{code} does not match septic shock well; expected R57.2 family.")
+        if "diverticulitis" in cause and not code.startswith("K57"):
+            issues.append(f"{code} does not match diverticulitis well; expected K57 family.")
+        if "peritonitis" in cause and not code.startswith(("K65", "K57")):
+            issues.append(f"{code} does not match peritonitis/diverticulitis well.")
 
     for x in coded_causes:
         if x.get("selection_status") == "manual_review":
@@ -962,9 +1100,9 @@ with st.sidebar:
         if os.path.exists(CACHE_DIR):
             shutil.rmtree(CACHE_DIR)
         st.cache_resource.clear()
-        for k in list(st.session_state.keys()):
-            if k.startswith("code_edit_"):
-                del st.session_state[k]
+        keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
+        for k in keys_to_remove:
+            del st.session_state[k]
         st.session_state["df_source"] = None
         st.session_state["df_metadata"] = None
         st.session_state["faiss_index"] = None
@@ -981,7 +1119,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         '<div style="font-size:.72rem;opacity:.65;text-align:center;line-height:2">'
-        'Ministry of Health<br>Deterministic ICD-10 Coding v2</div>',
+        'Ministry of Health<br>Deterministic ICD-10 Coding v3</div>',
         unsafe_allow_html=True,
     )
 
@@ -1002,13 +1140,10 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # =============================================================================
-# Safe auto-load resources
+# Load resources
 # =============================================================================
 if st.session_state["df_source"] is None:
     df_excel = None
-    df_meta = None
-    faiss_index = None
-    bm25 = None
     load_errors = []
 
     try:
@@ -1063,7 +1198,7 @@ def render_steps(current: int):
     st.markdown(html_s, unsafe_allow_html=True)
 
 # =============================================================================
-# PAGE 1 - Basic Information
+# PAGE 1
 # =============================================================================
 if st.session_state.page == 1:
     render_steps(1)
@@ -1076,20 +1211,12 @@ if st.session_state.page == 1:
         full_name = st.text_input("Full Name*", placeholder="Mohammed Abdullah Al-Otaibi")
         national_id = st.text_input("National ID / Iqama*", placeholder="1XXXXXXXXX")
         nationality = st.text_input("Nationality", placeholder="Saudi")
-        dob = st.date_input(
-            "Date of Birth",
-            value=datetime.date(1960, 1, 1),
-            min_value=datetime.date(1900, 1, 1),
-            max_value=datetime.date.today()
-        )
-
+        dob = st.date_input("Date of Birth", value=datetime.date(1960, 1, 1),
+                            min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
     with c2:
         sex = st.selectbox("Sex*", ["Male", "Female"])
         marital_status = st.selectbox("Marital Status", ["Single", "Married", "Divorced", "Widowed"])
-        education = st.selectbox(
-            "Education",
-            ["Illiterate", "Primary", "Intermediate", "Secondary", "Diploma", "Bachelor", "Postgraduate", "Unknown"]
-        )
+        education = st.selectbox("Education", ["Illiterate", "Primary", "Intermediate", "Secondary", "Diploma", "Bachelor", "Postgraduate", "Unknown"])
         occupation = st.text_input("Occupation", placeholder="Engineer")
         address = st.text_input("Address", placeholder="Riyadh")
 
@@ -1133,7 +1260,7 @@ if st.session_state.page == 1:
             st.rerun()
 
 # =============================================================================
-# PAGE 2 - Medical History
+# PAGE 2
 # =============================================================================
 elif st.session_state.page == 2:
     render_steps(2)
@@ -1159,10 +1286,7 @@ elif st.session_state.page == 2:
         inpatient_days = st.number_input("Hospital Stay (days)", min_value=0, value=0)
         was_pregnant = "N/A"
         if fd.get("sex") == "Female":
-            was_pregnant = st.selectbox(
-                "Pregnancy Status",
-                ["No", "Pregnant", "During delivery", "Within 42 days postpartum", "N/A"]
-            )
+            was_pregnant = st.selectbox("Pregnancy Status", ["No", "Pregnant", "During delivery", "Within 42 days postpartum", "N/A"])
         chronic_conditions = st.multiselect(
             "Known Chronic Conditions",
             ["Diabetes", "Hypertension", "Heart disease", "Renal disease", "Liver disease",
@@ -1192,7 +1316,7 @@ elif st.session_state.page == 2:
             st.rerun()
 
 # =============================================================================
-# PAGE 3 - Cause Narrative
+# PAGE 3
 # =============================================================================
 elif st.session_state.page == 3:
     render_steps(3)
@@ -1203,8 +1327,7 @@ elif st.session_state.page == 3:
     st.markdown(
         '<div style="background:#fffbe6;border-left:3px solid #C8A951;padding:9px 14px;'
         'border-radius:5px;margin-bottom:1.1rem;font-size:.87rem;color:#5a4a00">'
-        'Write a single paragraph in plain language or medical language. '
-        'For best results, write the immediate cause first, then the underlying sequence, then other significant conditions.</div>',
+        'Write the immediate cause first, then the underlying sequence, then other significant conditions.</div>',
         unsafe_allow_html=True
     )
 
@@ -1213,9 +1336,10 @@ elif st.session_state.page == 3:
         value=fd.get("free_text", ""),
         height=220,
         placeholder=(
-            "Example: The patient died from acute respiratory distress syndrome (2 days) "
-            "due to septic shock (5 days) due to perforated sigmoid diverticulitis with generalized peritonitis (10 days). "
-            "Other significant conditions included type 2 diabetes mellitus with vasculopathy (12 years) and obesity (20 years)."
+            "The patient died from acute respiratory distress syndrome (2 days) due to septic shock (5 days) "
+            "due to perforated sigmoid diverticulitis with generalized peritonitis (10 days). "
+            "Other significant conditions included type 2 diabetes mellitus with diabetic vasculopathy (12 years) "
+            "and chronic obesity with metabolic syndrome (20 years)."
         ),
     )
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1238,7 +1362,7 @@ elif st.session_state.page == 3:
                 st.rerun()
 
 # =============================================================================
-# PAGE 4 - Review & Coding
+# PAGE 4
 # =============================================================================
 elif st.session_state.page == 4:
     render_steps(4)
@@ -1270,9 +1394,6 @@ elif st.session_state.page == 4:
                 bm25=bm25,
                 sex_value=fd.get("sex", ""),
             )
-
-        for i, item in enumerate(st.session_state.icd_results["coded_causes"]):
-            st.session_state[f"code_edit_{i}"] = item.get("code_formatted", "")
 
     results = st.session_state.icd_results
     coded_causes = results["coded_causes"]
@@ -1341,7 +1462,6 @@ elif st.session_state.page == 4:
                 + escape(item["label"]) + ' — ' + escape(item["cause"])
                 + ' <span style="opacity:.82;font-weight:400;font-size:.78rem"> | Interval: '
                 + escape(item["interval"]) + '</span></div>'
-
                 '<div style="display:grid;grid-template-columns:1fr 1.6fr 2.4fr 2.5fr;gap:0">'
 
                 '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'
@@ -1373,10 +1493,13 @@ elif st.session_state.page == 4:
                 unsafe_allow_html=True,
             )
 
+            widget_key = f"code_edit_{idx}"
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = code_val
+
             new_code = st.text_input(
                 f"Edit ICD code for: {item['cause'][:50]}",
-                value=st.session_state.get(f"code_edit_{idx}", code_val),
-                key=f"code_edit_{idx}",
+                key=widget_key,
                 placeholder="e.g. I21.0",
             )
 
@@ -1411,8 +1534,8 @@ elif st.session_state.page == 4:
         part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
         part2 = [x for x in coded_causes if x["role"] == "other"]
 
-        part1_rows = ""
         row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
+        part1_rows = ""
         for i, x in enumerate(part1):
             part1_rows += (
                 '<div class="cert-field"><span class="cert-label">'
@@ -1489,8 +1612,6 @@ elif st.session_state.page == 4:
             '<div>' + escape(str(fd.get("date_issued", datetime.date.today()))) + '</div></div></div></div>',
             unsafe_allow_html=True,
         )
-
-        st.markdown("---")
 
         cert_lines = [
             "DEATH CERTIFICATE",
