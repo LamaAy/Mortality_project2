@@ -796,7 +796,26 @@ elif st.session_state.page == 4:
                 + ": " + cause_item["cause"][:50] + "..."
             )
             try:
-                hits      = search_icd(df_icd, fidx, cause_item["cause"], top_k=5)
+                # Expand query with synonyms to improve embedding match accuracy
+                search_q = cause_item["cause"]
+                # Boost specificity: add type hints for common ambiguous terms
+                sq_lower = search_q.lower()
+                if "type 2" in sq_lower or "type ii" in sq_lower or "t2" in sq_lower:
+                    search_q = search_q + " E11 non-insulin dependent diabetes mellitus"
+                elif "type 1" in sq_lower or "type i" in sq_lower or "t1" in sq_lower:
+                    search_q = search_q + " E10 insulin dependent diabetes mellitus"
+                elif "diabetes" in sq_lower:
+                    search_q = search_q + " E11 type 2 diabetes mellitus"
+                hits = search_icd(df_icd, fidx, search_q, top_k=8)
+                # Deduplicate and keep top 5
+                seen = set()
+                hits_dedup = []
+                for h in hits:
+                    c = h.get("code_formatted","")
+                    if c not in seen:
+                        seen.add(c)
+                        hits_dedup.append(h)
+                hits = hits_dedup[:5]
                 full_rows = []
                 for h in hits:
                     row_data = get_excel_row(df_excel, h.get("code_formatted",""))
@@ -843,62 +862,60 @@ elif st.session_state.page == 4:
     coded_causes = st.session_state.icd_results["coded_causes"]
     concepts     = st.session_state.icd_results["concepts"]
 
-    tab_res, tab_cert = st.tabs(["رموز ICD-10 والتوصيات", "معاينة الشهادة"])
+    tab_res, tab_cert = st.tabs(["ICD-10 Codes & Notes", "Certificate Preview"])
 
     with tab_res:
-        st.markdown(
-            '<div style="font-size:.8rem;color:var(--muted);margin-bottom:1.2rem">'            'كل رمز مستخرج من قاعدة ICD-10 الرسمية عبر البحث الدلالي + Claude. '            'رمز ICD-10 قابل للتعديل — باقي الحقول للعرض فقط.</div>',
-            unsafe_allow_html=True)
-
-        role_hdr = {"immediate":"#006940","contributing":"#2d7a4f","other":"#5a7060"}
+        role_hdr = {"immediate": "#006940", "contributing": "#2d7a4f", "other": "#5a7060"}
+        role_label_en = {"immediate": "Immediate Cause", "contributing": "Contributing Cause", "other": "Other Condition"}
 
         for idx, item in enumerate(coded_causes):
-            acc    = item.get("acceptable_main","")
-            bg_acc = "#006940" if acc=="Acceptable" else ("#c0392b" if acc else "#888")
-            acc_ar = "✓ مقبول كسبب رئيسي" if acc=="Acceptable" else                      ("✗ غير مقبول كسبب رئيسي" if acc else "غير محدد")
-            rc = role_hdr.get(item["role"],"#555")
+            acc    = item.get("acceptable_main", "")
+            bg_acc = "#006940" if acc == "Acceptable" else ("#c0392b" if acc else "#888")
+            acc_en = "✓ Acceptable as main cause" if acc == "Acceptable" else ("✗ Not acceptable as main cause" if acc else "Unknown")
+            rc     = role_hdr.get(item["role"], "#555")
+            role_en = role_label_en.get(item["role"], item["label"])
 
-            # Header bar (dark green = role)
+            # Only show badge on immediate cause (doctor already decided to enter others)
+            show_badge = (item["role"] == "immediate")
+
+            # header
             st.markdown(
-                '<div style="border:1.5px solid #c8dece;border-radius:8px;'                'margin-bottom:1.4rem;overflow:hidden">'                '<div style="background:' + rc + ';color:white;padding:.5rem 1rem;'                'font-size:.84rem;font-weight:700">'                + item["label"] + ' — ' + item["cause"]                + ' <span style="opacity:.75;font-weight:400"> | الفترة: '                + item["interval"] + '</span></div>',
+                '<div style="border:1.5px solid #c8dece;border-radius:8px;margin-bottom:1.4rem;overflow:hidden">'                '<div style="background:' + rc + ';color:white;padding:.5rem 1rem;font-size:.84rem;font-weight:700">'                + role_en + ' — ' + item["cause"]                + ' <span style="opacity:.75;font-weight:400"> | Interval: ' + item["interval"] + '</span></div>',
                 unsafe_allow_html=True)
 
-            # 4 columns
             c1, c2, c3, c4 = st.columns([1.1, 1.7, 2.7, 2.5])
 
             with c1:
-                new_code = st.text_input(
-                    "رمز ICD-10",
-                    value=item.get("code_formatted",""),
-                    key="code_" + str(idx),
-                )
-                st.markdown(
-                    '<span style="background:' + bg_acc + ';color:white;'                    'border-radius:4px;padding:2px 9px;font-size:.72rem;font-weight:700">'                    + acc_ar + '</span>',
-                    unsafe_allow_html=True)
+                code_val = item.get("code_formatted", "") or item.get("selected_code", "")
+                st.text_input("ICD-10 Code", value=code_val, key="code_" + str(idx))
+                if show_badge:
+                    st.markdown(
+                        '<span style="background:' + bg_acc + ';color:white;border-radius:4px;'                        'padding:2px 9px;font-size:.72rem;font-weight:700">' + acc_en + '</span>',
+                        unsafe_allow_html=True)
 
             with c2:
                 st.text_input(
-                    "اسم المرض",
-                    value=item.get("short_desc",""),
+                    "Disease Name",
+                    value=item.get("short_desc", ""),
                     key="short_" + str(idx),
                     disabled=True,
                 )
 
             with c3:
                 st.text_area(
-                    "الوصف التفصيلي",
-                    value=item.get("long_desc",""),
+                    "Full Description",
+                    value=item.get("long_desc", ""),
                     key="long_" + str(idx),
                     height=105,
                     disabled=True,
                 )
 
             with c4:
-                notes_val = item.get("notes","")
-                notes_bg  = "#fff5f5" if acc != "Acceptable" else "#f0faf4"
+                notes_val    = item.get("notes", "")
+                notes_bg     = "#fff5f5" if acc != "Acceptable" else "#f0faf4"
                 notes_border = "#e8b4b8" if acc != "Acceptable" else "#9ecaad"
                 st.markdown(
-                    '<div style="background:' + notes_bg + ';border:1px solid '                    + notes_border + ';border-radius:6px;padding:.6rem .8rem;'                    'font-size:.82rem;color:#1a2e1a;min-height:105px;line-height:1.65">'                    '<div style="font-weight:700;color:var(--green);margin-bottom:.35rem">'                    'ملاحظات الترميز</div>'                    + notes_val + '</div>',
+                    '<div style="background:' + notes_bg + ';border:1px solid ' + notes_border                    + ';border-radius:6px;padding:.6rem .8rem;font-size:.82rem;'                    'color:#1a2e1a;min-height:105px;line-height:1.65">'                    '<div style="font-weight:700;color:var(--green);margin-bottom:.35rem">Coding Notes</div>'                    + notes_val + '</div>',
                     unsafe_allow_html=True)
 
             st.markdown('</div>', unsafe_allow_html=True)
