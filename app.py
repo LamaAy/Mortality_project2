@@ -364,10 +364,23 @@ def extract_concepts(free_text: str, gender: str, age: str) -> dict:
 def get_recommendation(concepts: dict, candidates: dict, gender: str, age: str, extra: str) -> str:
     sys_p = (
         "You are a senior clinical coding specialist at Saudi MOH. "
-        "Provide: (1) best ICD-10 code for immediate cause with justification, "
-        "(2) codes for contributing causes, (3) gender/age validity warnings, "
-        "(4) WHO/MOH coding rules, (5) completeness advice. "
-        "Respond in Arabic with ICD codes inline. Be concise and clinically precise."
+        "Structure your Arabic response with exactly these six numbered sections:\n\n"
+        "(1) السبب المباشر للوفاة\n"
+        "Write one ICD code per line in this exact format: CODE - description\n"
+        "Then one short justification line starting with *\n\n"
+        "(2) الأسباب المساهمة\n"
+        "Each cause: CODE - description, then one bullet *\n\n"
+        "(3) حالات أخرى مساهمة\n"
+        "Each: CODE - description\n\n"
+        "(4) التحقق من صحة العمر والجنس\n"
+        "One short sentence.\n\n"
+        "(5) قواعد التشفير WHO/MOH\n"
+        "Two or three bullets starting with *\n\n"
+        "(6) الترميز النهائي للإحصائيات\n"
+        "One line: السبب الأساسي: CODE\n\n"
+        "STRICT RULES: No markdown bold (**), no emoji, no headers with #. "
+        "ICD codes always in format LETTER+DIGITS+DOT+DIGITS (e.g. I21.0, E11.9). "
+        "Keep each section brief."
     )
     user = (
         f"Patient: {age}yo, {gender}\n{extra}\n\n"
@@ -660,28 +673,126 @@ elif st.session_state.page == 4:
 
         # ── توصيات الترميز ─────────────────────────────────────────────────
         with tab1:
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-title">المفاهيم الطبية المستخرجة / Extracted Concepts</div>', unsafe_allow_html=True)
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**السبب الفوري:** {concepts.get('immediate_cause','—')}")
-                if concepts.get("contributing_causes"):
-                    st.markdown("**الأسباب المساهمة:**")
-                    for c in concepts["contributing_causes"]: st.markdown(f"- {c}")
-            with col2:
-                if concepts.get("other_conditions"):
-                    st.markdown("**حالات أخرى:**")
-                    for c in concepts["other_conditions"]: st.markdown(f"- {c}")
-                ivs = concepts.get("intervals", {})
-                if ivs:
-                    st.markdown("**الفترات الزمنية:**")
-                    st.json(ivs)
-            st.markdown('</div>', unsafe_allow_html=True)
+            # — Extracted concepts card —
+            ivs        = concepts.get("intervals", {}) or {}
+            imm_int    = ivs.get("immediate_cause", "—")
+            contrib_iv = ivs.get("contributing_causes", [])
 
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-title">توصية الترميز / AI Coding Recommendation</div>', unsafe_allow_html=True)
-            st.markdown(ai_rec)
-            st.markdown('</div>', unsafe_allow_html=True)
+            imm_row = f"""
+            <div style="display:flex;justify-content:space-between;align-items:center;
+                        padding:.5rem .8rem;background:#f0faf4;border-radius:6px;margin-bottom:.5rem;
+                        border:1px solid #9ecaad">
+              <div>
+                <div style="font-size:.72rem;color:var(--muted);font-weight:600;letter-spacing:.04em">السبب الفوري / IMMEDIATE CAUSE</div>
+                <div style="font-size:.97rem;font-weight:700;color:var(--green);margin-top:2px">{concepts.get('immediate_cause','—')}</div>
+              </div>
+              <div style="text-align:left;color:var(--muted);font-size:.82rem">{imm_int}</div>
+            </div>"""
+
+            contrib_rows_html = ""
+            for idx, c in enumerate(concepts.get("contributing_causes") or []):
+                iv = contrib_iv[idx] if idx < len(contrib_iv) else "—"
+                letter = chr(0x628 + idx)  # ب، ج، د
+                contrib_rows_html += f"""
+            <div style="display:flex;justify-content:space-between;align-items:center;
+                        padding:.45rem .8rem;border-bottom:1px solid #e8ede9">
+              <div style="display:flex;gap:.6rem;align-items:center">
+                <span style="background:var(--green);color:white;border-radius:50%;
+                             width:22px;height:22px;display:inline-flex;align-items:center;
+                             justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0">
+                  {chr(0x627 + idx + 1)}
+                </span>
+                <span style="font-size:.9rem">{c}</span>
+              </div>
+              <span style="color:var(--muted);font-size:.8rem;white-space:nowrap">{iv}</span>
+            </div>"""
+
+            other_rows_html = ""
+            for c in (concepts.get("other_conditions") or []):
+                other_rows_html += f"""
+            <div style="padding:.4rem .8rem;border-bottom:1px solid #f0f4f0;
+                        font-size:.88rem;color:#3a5a3e">{c}</div>"""
+
+            st.markdown(f"""
+            <div class="section-card">
+              <div class="section-title">المفاهيم الطبية المستخرجة / Extracted Concepts</div>
+              {imm_row}
+              {"<div style='background:white;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:.6rem'>" + contrib_rows_html + "</div>" if contrib_rows_html else ""}
+              {"<div style='margin-top:.5rem'><div style='font-size:.72rem;color:var(--muted);font-weight:600;letter-spacing:.04em;margin-bottom:.3rem'>حالات أخرى / OTHER CONDITIONS</div><div style=background:white;border:1px solid var(--border);border-radius:6px;overflow:hidden>' + other_rows_html + '</div></div>" if other_rows_html else ""}
+            </div>
+            """, unsafe_allow_html=True)
+
+            # — AI recommendation rendered as structured HTML —
+            # Convert the markdown text to clean HTML sections
+            def render_recommendation(text: str) -> str:
+                """Convert AI markdown output to clean styled HTML."""
+                lines  = text.strip().splitlines()
+                html   = ""
+                i      = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if not line:
+                        i += 1
+                        continue
+
+                    # Section headers — lines starting with ( or numbered
+                    if re.match(r"^\(?[١٢٣٤٥٦1-6]\)?[\.\-\)]", line) or re.match(r"^#{1,3}\s", line):
+                        clean = re.sub(r"^#{1,3}\s*|\*+", "", line).strip()
+                        html += (f'<div style="font-size:.88rem;font-weight:700;color:var(--green);'
+                                 f'border-right:3px solid var(--green);padding-right:.6rem;'
+                                 f'margin:1rem 0 .4rem">{clean}</div>')
+
+                    # ICD code lines — contain pattern like I50.1 or E11.9
+                    elif re.search(r"\b[A-Z]\d{2}[\.\d]*\b", line):
+                        code_match = re.search(r"\b([A-Z]\d{2}[\.\d]*)\b", line)
+                        code       = code_match.group(1) if code_match else ""
+                        desc       = re.sub(r"\*+|\b[A-Z]\d{2}[\.\d]*\b", "", line).strip(" -–*:")
+                        # grab any sub-bullets
+                        notes_html = ""
+                        while i + 1 < len(lines) and lines[i+1].strip().startswith("*"):
+                            i += 1
+                            note = lines[i].strip().lstrip("*").strip()
+                            notes_html += f'<div style="font-size:.78rem;color:var(--muted);padding-right:.5rem">— {note}</div>'
+                        html += f"""
+                        <div style="display:flex;gap:.8rem;align-items:flex-start;
+                                    padding:.55rem .8rem;background:#f0faf4;border-radius:6px;
+                                    margin:.3rem 0;border:1px solid #9ecaad">
+                          <span style="font-family:'Courier New',monospace;font-weight:800;
+                                       color:var(--green);font-size:1rem;white-space:nowrap">{code}</span>
+                          <div>
+                            <div style="font-size:.9rem;color:#1a2e1a">{desc}</div>
+                            {notes_html}
+                          </div>
+                        </div>"""
+
+                    # Check/validation lines
+                    elif line.startswith("✅") or line.startswith("مناسب") or "صحيح" in line or "مكتمل" in line:
+                        clean = line.replace("✅","").strip()
+                        html += (f'<div style="background:#f0faf4;border-right:3px solid #2e7d52;'
+                                 f'padding:.4rem .7rem;border-radius:4px;margin:.25rem 0;'
+                                 f'font-size:.86rem;color:#1a4a2e">{clean}</div>')
+
+                    # Bullet / note lines
+                    elif line.startswith("*") or line.startswith("-") or line.startswith("•"):
+                        clean = line.lstrip("*-•").strip()
+                        html += (f'<div style="padding:.2rem .8rem;font-size:.86rem;'
+                                 f'color:#2a4a2e;border-bottom:1px solid #f0f4f0">'
+                                 f'<span style="color:var(--green);margin-left:.4rem">—</span> {clean}</div>')
+
+                    # Plain text / summary line
+                    else:
+                        html += f'<div style="font-size:.88rem;padding:.3rem 0;color:#1a2e1a">{line}</div>'
+
+                    i += 1
+                return html
+
+            rec_html = render_recommendation(ai_rec)
+            st.markdown(f"""
+            <div class="section-card">
+              <div class="section-title">توصية الترميز / AI Coding Recommendation</div>
+              <div style="line-height:1.7">{rec_html}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
         # ── مرشحو ICD-10 ──────────────────────────────────────────────────
         with tab2:
