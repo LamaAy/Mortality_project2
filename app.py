@@ -774,16 +774,25 @@ elif st.session_state.page == 4:
 
         # ── STEP 2: per cause → search → fetch Excel row → Claude ────────────
         s2_sys = (
-            "You are a senior clinical coding specialist at Saudi MOH. "
-            "Select the BEST ICD-10 code for the given cause of death "
-            "using the top-5 candidate rows from the official ICD-10 database. "
+            "You are an ICD-10 code selector. "
+            "You will be given a cause of death and candidate rows from an ICD-10 database. "
+            "Each row contains: Code, CodeFormatted, ShortDesc, LongDesc, AcceptableMain, GenderRestriction, Classification. "
+            "Your job: select the row that best matches the cause of death. "
+            "STRICT RULES: "
+            "(1) copy ShortDesc, LongDesc, AcceptableMain, GenderRestriction EXACTLY from the chosen row — do not paraphrase or add anything. "
+            "(2) For 'notes': write ONLY what is stated in the row fields. "
+            "   - State the AcceptableMain value from the row. "
+            "   - If GenderRestriction exists in the row, state it. "
+            "   - If no candidate row matches well, say: 'No close match found in candidates. Suggested code: [your best guess code] — please verify manually.' "
+            "   - Do NOT use outside medical knowledge. Do NOT explain pathophysiology. "
+            "   - Maximum 2 sentences. "
             "Return ONLY valid JSON with no markdown fences:\n"
             "{"
-            "\"code_formatted\": \"e.g. I21.0\"," 
-            "\"short_desc\": \"exact ShortDesc from the chosen row\"," 
-            "\"long_desc\": \"exact LongDesc from the chosen row\"," 
-            "\"acceptable_main\": \"Acceptable or Not Acceptable\"," 
-            "\"notes\": \"In English: brief clinical justification for this code. If unacceptable as main cause, explain why and suggest better alternative. Flag gender restrictions. 2-3 sentences max.\""
+            "\"code_formatted\": \"exact CodeFormatted from chosen row\","
+            "\"short_desc\": \"exact ShortDesc from chosen row\","
+            "\"long_desc\": \"exact LongDesc from chosen row\","
+            "\"acceptable_main\": \"exact AcceptableMain value from chosen row\","
+            "\"notes\": \"based strictly on row data only\""
             "}"
         )
 
@@ -796,37 +805,53 @@ elif st.session_state.page == 4:
                 + ": " + cause_item["cause"][:50] + "..."
             )
             try:
-                # Expand query with synonyms to improve embedding match accuracy
-                search_q = cause_item["cause"]
-                # Boost specificity: add type hints for common ambiguous terms
-                sq_lower = search_q.lower()
-                if "type 2" in sq_lower or "type ii" in sq_lower or "t2" in sq_lower:
-                    search_q = search_q + " E11 non-insulin dependent diabetes mellitus"
-                elif "type 1" in sq_lower or "type i" in sq_lower or "t1" in sq_lower:
-                    search_q = search_q + " E10 insulin dependent diabetes mellitus"
-                elif "diabetes" in sq_lower:
-                    search_q = search_q + " E11 type 2 diabetes mellitus"
-                hits = search_icd(df_icd, fidx, search_q, top_k=8)
-                # Deduplicate and keep top 5
-                seen = set()
-                hits_dedup = []
-                for h in hits:
-                    c = h.get("code_formatted","")
-                    if c not in seen:
-                        seen.add(c)
-                        hits_dedup.append(h)
-                hits = hits_dedup[:5]
+                cause_text = cause_item["cause"]
+                sq_lower   = cause_text.lower()
+
+                # ── A) Semantic search k=15 ───────────────────────────────
+                sem_hits = search_icd(df_icd, fidx, cause_text, top_k=15)
+
+                # ── B) Keyword search directly on df_excel ShortDesc+LongDesc ──
+                kw_hits = []
+                if df_excel is not None:
+                    # extract meaningful words (>3 chars)
+                    kw_terms = [t for t in sq_lower.split() if len(t) > 3]
+                    if kw_terms:
+                        def kw_score(row):
+                            txt = (str(row.get("ShortDesc","")) + " " +
+                                   str(row.get("LongDesc",""))).lower()
+                            return sum(t in txt for t in kw_terms)
+                        scores = df_excel.apply(kw_score, axis=1)
+                        top_idx = scores.nlargest(10).index
+                        for i in top_idx:
+                            if scores[i] > 0:
+                                r = {k: str(v) for k, v in df_excel.iloc[i].to_dict().items()}
+                                kw_hits.append(r)
+
+                # ── C) Merge: semantic first, then keyword additions ──────
+                seen      = set()
                 full_rows = []
-                for h in hits:
-                    row_data = get_excel_row(df_excel, h.get("code_formatted",""))
-                    full_rows.append(row_data if row_data else h)
+                for h in sem_hits:
+                    code = h.get("code_formatted","")
+                    if code and code not in seen:
+                        seen.add(code)
+                        row_data = get_excel_row(df_excel, code)
+                        full_rows.append(row_data if row_data else h)
+                for r in kw_hits:
+                    code = r.get("CodeFormatted","") or r.get("Code","")
+                    if code and code not in seen:
+                        seen.add(code)
+                        full_rows.append(r)
+
+                # Keep top 10 for Claude (more options = better selection)
+                full_rows = full_rows[:10]
 
                 s2_user = (
                     "Patient: " + age_str + "yo, " + gender_str + "\n"
                     + "Role: " + cause_item["role"]
                     + " | Interval: " + cause_item["interval"] + "\n"
                     + "Cause of death: " + cause_item["cause"] + "\n\n"
-                    + "Top-5 ICD-10 candidates from database:\n"
+                    + "Top ICD-10 candidates from database (semantic + keyword search):\n"
                     + json.dumps(full_rows, ensure_ascii=False, indent=2)
                 )
                 raw2 = call_claude(s2_sys, s2_user, max_tokens=500)
