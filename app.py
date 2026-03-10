@@ -202,33 +202,30 @@ except Exception:
     st.error("مفتاح API غير موجود. يرجى إضافة ANTHROPIC_API_KEY في Streamlit Secrets.")
     st.stop()
 
+# ── Google Drive file IDs ─────────────────────────────────────────────────────
+# Set these two IDs once — the app downloads and caches the files automatically.
+# Find the ID in your Drive share link: drive.google.com/file/d/FILE_ID/view
+GDRIVE_EMBEDDINGS_ID = "1lSxHUBswhVtfTzDvbWHmsdmQIt0-Ne8J"   # embeddings.npy
+GDRIVE_METADATA_ID   = ""   # metadata.pkl — add your file ID here
+CACHE_DIR            = os.path.join(os.path.expanduser("~"), ".icd10_cache")
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### اعدادات النظام")
     st.markdown("---")
-
-    st.markdown("### مصدر بيانات ICD-10")
-    data_source = st.radio(
-        "اختر مصدر البيانات",
-        ["Google Drive", "رفع ملف Excel"],
-        label_visibility="collapsed",
+    st.markdown("### بيانات ICD-10")
+    st.markdown(
+        '<div style="font-size:.78rem;opacity:.8;padding:.3rem 0;line-height:1.7">'        'البيانات تُحمَّل تلقائياً من Google Drive'        '<br>ولا تحتاج إلى رفع أي ملف.</div>',
+        unsafe_allow_html=True,
     )
-
-    if data_source == "Google Drive":
-        drive_meta  = st.text_input(
-            "مسار metadata.pkl",
-            value="/content/drive/MyDrive/ICD10_RAG/metadata.pkl",
-        )
-        drive_index = st.text_input(
-            "مسار faiss_index.bin",
-            value="/content/drive/MyDrive/ICD10_RAG/faiss_index.bin",
-        )
-        load_btn = st.button("تحميل من Drive", use_container_width=True)
-    else:
-        uploaded_excel = st.file_uploader("رفع ICD10_Enriched_Final.xlsx", type=["xlsx"])
-        load_btn       = False
-        drive_meta     = ""
-        drive_index    = ""
+    if st.button("إعادة تحميل البيانات", use_container_width=True):
+        import shutil
+        if os.path.exists(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+        st.session_state.df_icd      = None
+        st.session_state.faiss_index = None
+        st.cache_resource.clear()
+        st.rerun()
 
     st.markdown("---")
     st.markdown("### بيانات المستشفى")
@@ -238,8 +235,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(
-        '<div style="font-size:.7rem;opacity:.55;text-align:center;line-height:2">'
-        'وزارة الصحة – 1446هـ<br>الإصدار 2.1</div>',
+        '<div style="font-size:.7rem;opacity:.55;text-align:center;line-height:2">'        'وزارة الصحة – 1446هـ<br>الإصدار 2.3</div>',
         unsafe_allow_html=True,
     )
 
@@ -249,41 +245,78 @@ for k, v in [("page", 1), ("form_data", {}), ("icd_results", None),
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── ICD loaders ───────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="جارٍ تحميل بيانات ICD-10...")
-def load_from_excel(file_bytes: bytes) -> pd.DataFrame:
-    df = pd.read_excel(io.BytesIO(file_bytes))
-    df.columns = ["Id","Code","CodeFormatted","ShortDesc","LongDesc",
-                  "HIPPA","Deleted","Classification","AcceptableMain",
-                  "GenderRestriction","MatchSource","MatchedFromCode","Note"]
-    df = df[df["Deleted"] != "Yes"].dropna(subset=["Code"]).reset_index(drop=True)
-    df["EmbedText"] = (df["CodeFormatted"].fillna("") + " | " +
-                       df["LongDesc"].fillna("") + " | " +
-                       df["ShortDesc"].fillna(""))
-    return df
+# ── Google Drive downloader ───────────────────────────────────────────────────
+def _gdrive_download(file_id: str, dest_path: str) -> None:
+    """Download a public Google Drive file, handling the virus-scan redirect."""
+    import requests
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    session  = requests.Session()
+    URL      = "https://drive.google.com/uc"
+    response = session.get(URL, params={"export": "download", "id": file_id}, stream=True)
+    # Handle large-file confirmation
+    token = next((v for k, v in response.cookies.items() if k.startswith("download_warning")), None)
+    if token:
+        response = session.get(URL, params={"export": "download", "id": file_id, "confirm": token}, stream=True)
+    if b"confirm=" in response.content[:3000]:
+        import re as _re
+        m = _re.search(rb'confirm=([0-9A-Za-z_\-]+)', response.content[:3000])
+        if m:
+            response = session.get(URL, params={"export": "download", "id": file_id,
+                                                "confirm": m.group(1).decode()}, stream=True)
+    with open(dest_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
 
-@st.cache_resource(show_spinner="جارٍ تحميل البيانات من Google Drive...")
-def load_from_drive(meta_path: str, index_path: str):
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError(f"الملف غير موجود: {meta_path}")
-    with open(meta_path, "rb") as f:
-        df = pickle.load(f)
-    # Normalise columns if needed
-    if "CodeFormatted" not in df.columns and "Code (Formatted)" in df.columns:
-        df.columns = ["Id","Code","CodeFormatted","ShortDesc","LongDesc",
-                      "HIPPA","Deleted","Classification","AcceptableMain",
-                      "GenderRestriction","MatchSource","MatchedFromCode","Note"]
+# ── ICD data helpers ──────────────────────────────────────────────────────────
+def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
+    if "CodeFormatted" not in df.columns:
+        try:
+            df.columns = ["Id","Code","CodeFormatted","ShortDesc","LongDesc",
+                          "HIPPA","Deleted","Classification","AcceptableMain",
+                          "GenderRestriction","MatchSource","MatchedFromCode","Note"]
+        except ValueError:
+            pass
+    if "Deleted" in df.columns:
+        df = df[df["Deleted"] != "Yes"].copy()
+    df = df.dropna(subset=["Code"]).reset_index(drop=True)
     if "EmbedText" not in df.columns:
         df["EmbedText"] = (df["CodeFormatted"].fillna("") + " | " +
                            df["LongDesc"].fillna("") + " | " +
                            df["ShortDesc"].fillna(""))
+    return df
+
+@st.cache_resource(show_spinner="جارٍ تحميل بيانات ICD-10 من Google Drive...")
+def _load_icd_cached(embeddings_id: str, metadata_id: str, cache_dir: str):
+    """Download from Drive once, cache locally forever."""
+    os.makedirs(cache_dir, exist_ok=True)
+    emb_path  = os.path.join(cache_dir, "embeddings.npy")
+    meta_path = os.path.join(cache_dir, "metadata.pkl")
+
+    if embeddings_id and not os.path.exists(emb_path):
+        _gdrive_download(embeddings_id, emb_path)
+
+    if metadata_id and not os.path.exists(meta_path):
+        _gdrive_download(metadata_id, meta_path)
+
+    # Load dataframe
+    df = None
+    if os.path.exists(meta_path):
+        with open(meta_path, "rb") as f:
+            df = pickle.load(f)
+        df = _normalise_df(df)
+
+    # Build FAISS index from embeddings
     faiss_idx = None
-    if index_path and os.path.exists(index_path):
+    if os.path.exists(emb_path) and df is not None:
         try:
             import faiss
-            faiss_idx = faiss.read_index(index_path)
-        except ImportError:
+            emb       = np.load(emb_path).astype("float32")
+            faiss_idx = faiss.IndexFlatIP(emb.shape[1])
+            faiss_idx.add(emb)
+        except Exception:
             pass
+
     return df, faiss_idx
 
 def _row_to_dict(row, score: float) -> dict:
@@ -314,29 +347,30 @@ def search_icd(df, fidx, query: str, top_k: int = 6) -> list:
                     for s, idx in zip(scores[0], indices[0]) if idx != -1]
         except Exception:
             pass
-    # Keyword fallback
-    terms  = query.lower().split()
-    scores = df["EmbedText"].str.lower().apply(lambda x: sum(t in x for t in terms))
-    top    = scores.nlargest(top_k).index
-    return [_row_to_dict(df.iloc[i], float(scores[i])) for i in top if scores[i] > 0]
+    terms = query.lower().split()
+    sc    = df["EmbedText"].str.lower().apply(lambda x: sum(t in x for t in terms))
+    top   = sc.nlargest(top_k).index
+    return [_row_to_dict(df.iloc[i], float(sc[i])) for i in top if sc[i] > 0]
 
-# ── Trigger loaders ───────────────────────────────────────────────────────────
-if data_source == "Google Drive" and load_btn:
-    try:
-        df, fidx = load_from_drive(drive_meta, drive_index)
-        st.session_state.df_icd      = df
-        st.session_state.faiss_index = fidx
-        mode = "FAISS" if fidx is not None else "keyword"
-        st.sidebar.success(f"تم تحميل {len(df):,} رمز  ({mode})")
-    except Exception as e:
-        st.sidebar.error(f"خطأ: {e}")
-
-elif data_source == "رفع ملف Excel":
-    if "uploaded_excel" in dir() and uploaded_excel and st.session_state.df_icd is None:
-        df = load_from_excel(uploaded_excel.read())
-        st.session_state.df_icd      = df
-        st.session_state.faiss_index = None
-        st.sidebar.success(f"تم تحميل {len(df):,} رمز ICD-10")
+# ── Auto-load on startup ───────────────────────────────────────────────────────
+if st.session_state.df_icd is None:
+    if not GDRIVE_EMBEDDINGS_ID and not GDRIVE_METADATA_ID:
+        st.sidebar.warning("يرجى إضافة GDRIVE_EMBEDDINGS_ID أو GDRIVE_METADATA_ID في الكود.")
+    else:
+        try:
+            df, fidx = _load_icd_cached(GDRIVE_EMBEDDINGS_ID, GDRIVE_METADATA_ID, CACHE_DIR)
+            if df is not None:
+                st.session_state.df_icd      = df
+                st.session_state.faiss_index = fidx
+                mode = "FAISS + embeddings" if fidx is not None else "keyword"
+                st.sidebar.success(f"تم تحميل {len(df):,} رمز  ({mode})")
+            else:
+                st.sidebar.warning(
+                    "تم تحميل embeddings.npy.\n\n"
+                    "أضف GDRIVE_METADATA_ID (file ID لملف metadata.pkl) في السطر 8 من الكود."
+                )
+        except Exception as e:
+            st.sidebar.error(f"خطأ في التحميل: {e}")
 
 # ── Claude helpers ─────────────────────────────────────────────────────────────
 def call_claude(system_prompt: str, user_content: str, max_tokens: int = 1500) -> str:
