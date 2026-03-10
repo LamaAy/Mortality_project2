@@ -1,6 +1,4 @@
 """
-app.py
-
 Saudi MOH - Electronic Death Certificate System
 English UI
 Hybrid ICD-10 coding:
@@ -687,20 +685,89 @@ def get_row_by_code(df: pd.DataFrame, code_str: str) -> Optional[pd.Series]:
     return None
 
 # =============================================================================
-# Claude JSON helpers
+# Claude JSON helpers (robust)
 # =============================================================================
-def call_claude_json(api_key: str, system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> dict:
+def _extract_text_from_claude_response(resp) -> str:
+    parts = []
+    for block in getattr(resp, "content", []):
+        txt = getattr(block, "text", None)
+        if txt:
+            parts.append(txt)
+    return "\n".join(parts).strip()
+
+
+def _extract_json_candidate(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.strip()
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")):
+        return text
+
+    start_obj = text.find("{")
+    end_obj = text.rfind("}")
+    if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
+        return text[start_obj:end_obj + 1]
+
+    start_arr = text.find("[")
+    end_arr = text.rfind("]")
+    if start_arr != -1 and end_arr != -1 and end_arr > start_arr:
+        return text[start_arr:end_arr + 1]
+
+    return text
+
+
+def _try_parse_json_loose(text: str):
+    if not text:
+        raise json.JSONDecodeError("Empty response", "", 0)
+
+    candidate = _extract_json_candidate(text)
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    cleaned = candidate.strip()
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+
+    return json.loads(cleaned)
+
+
+def call_claude_json(
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1200,
+    fallback: Optional[dict] = None,
+) -> dict:
     client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    text = resp.content[0].text.strip()
-    text = re.sub(r"^```json\s*|\s*```$", "", text).strip()
-    text = re.sub(r"^```\s*|\s*```$", "", text).strip()
-    return json.loads(text)
+
+    try:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=max_tokens,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        raw_text = _extract_text_from_claude_response(resp)
+        print("Claude raw response:", raw_text)
+        return _try_parse_json_loose(raw_text)
+
+    except Exception as e:
+        if fallback is not None:
+            out = fallback.copy()
+            out["_error"] = f"{type(e).__name__}: {e}"
+            return out
+        raise
+
 
 def extract_causes_with_claude(api_key: str, narrative: str, patient_info: dict) -> dict:
     system_prompt = """
@@ -740,7 +807,17 @@ Chronic conditions: {", ".join(patient_info.get("chronic_conditions", []))}
 Narrative:
 {narrative}
 """
-    return call_claude_json(api_key, system_prompt, user_prompt, max_tokens=900)
+    return call_claude_json(
+        api_key,
+        system_prompt,
+        user_prompt,
+        max_tokens=900,
+        fallback={
+            "part1_chain": [],
+            "part2_conditions": [],
+        },
+    )
+
 
 def select_code_from_candidates_with_claude(
     api_key: str,
@@ -751,6 +828,14 @@ def select_code_from_candidates_with_claude(
     age_years: int,
     candidates: list,
 ) -> dict:
+    if not candidates:
+        return {
+            "selected_code": "",
+            "reason": "No retrieved file candidates available.",
+            "manual_review": True,
+            "acceptable_main": "Unknown",
+        }
+
     slim_candidates = []
     for c in candidates:
         slim_candidates.append({
@@ -789,7 +874,34 @@ Patient age: {age_years}
 Candidate ICD rows:
 {json.dumps(slim_candidates, ensure_ascii=False, indent=2)}
 """
-    return call_claude_json(api_key, system_prompt, user_prompt, max_tokens=700)
+
+    result = call_claude_json(
+        api_key,
+        system_prompt,
+        user_prompt,
+        max_tokens=700,
+        fallback={
+            "selected_code": "",
+            "reason": "Claude JSON parse failed; requires manual review.",
+            "manual_review": True,
+            "acceptable_main": "Unknown",
+        },
+    )
+
+    if not isinstance(result, dict):
+        return {
+            "selected_code": "",
+            "reason": "Claude returned non-dict output; requires manual review.",
+            "manual_review": True,
+            "acceptable_main": "Unknown",
+        }
+
+    return {
+        "selected_code": str(result.get("selected_code", "") or "").strip(),
+        "reason": str(result.get("reason", "") or "").strip(),
+        "manual_review": bool(result.get("manual_review", True)),
+        "acceptable_main": str(result.get("acceptable_main", "Unknown") or "Unknown").strip(),
+    }
 
 # =============================================================================
 # Validation
@@ -893,15 +1005,23 @@ def code_causes_hybrid_with_claude(
             top_k=10,
         )
 
-        claude_choice = select_code_from_candidates_with_claude(
-            api_key=api_key,
-            cause_text=cause,
-            role=role,
-            interval=interval,
-            sex_value=patient_info.get("sex", ""),
-            age_years=patient_info.get("age_years", 0),
-            candidates=cands,
-        )
+        try:
+            claude_choice = select_code_from_candidates_with_claude(
+                api_key=api_key,
+                cause_text=cause,
+                role=role,
+                interval=interval,
+                sex_value=patient_info.get("sex", ""),
+                age_years=patient_info.get("age_years", 0),
+                candidates=cands,
+            )
+        except Exception as e:
+            claude_choice = {
+                "selected_code": "",
+                "reason": f"Claude selection failed: {type(e).__name__}: {e}",
+                "manual_review": True,
+                "acceptable_main": "Unknown",
+            }
 
         chosen_code = claude_choice.get("selected_code", "")
         row = get_row_by_code(df_source, chosen_code)
@@ -937,7 +1057,7 @@ def code_causes_hybrid_with_claude(
                 "classification": "",
                 "note": "",
                 "selection_status": "manual_review",
-                "selection_notes": "No valid candidate selected from file rows.",
+                "selection_notes": claude_choice.get("reason", "No valid candidate selected from file rows."),
                 "candidates": cands,
             }
 
@@ -960,15 +1080,23 @@ def code_causes_hybrid_with_claude(
             top_k=10,
         )
 
-        claude_choice = select_code_from_candidates_with_claude(
-            api_key=api_key,
-            cause_text=cause,
-            role="other",
-            interval=interval,
-            sex_value=patient_info.get("sex", ""),
-            age_years=patient_info.get("age_years", 0),
-            candidates=cands,
-        )
+        try:
+            claude_choice = select_code_from_candidates_with_claude(
+                api_key=api_key,
+                cause_text=cause,
+                role="other",
+                interval=interval,
+                sex_value=patient_info.get("sex", ""),
+                age_years=patient_info.get("age_years", 0),
+                candidates=cands,
+            )
+        except Exception as e:
+            claude_choice = {
+                "selected_code": "",
+                "reason": f"Claude selection failed: {type(e).__name__}: {e}",
+                "manual_review": True,
+                "acceptable_main": "Unknown",
+            }
 
         chosen_code = claude_choice.get("selected_code", "")
         row = get_row_by_code(df_source, chosen_code)
@@ -1004,7 +1132,7 @@ def code_causes_hybrid_with_claude(
                 "classification": "",
                 "note": "",
                 "selection_status": "manual_review",
-                "selection_notes": "No valid candidate selected from file rows.",
+                "selection_notes": claude_choice.get("reason", "No valid candidate selected from file rows."),
                 "candidates": cands,
             }
 
@@ -1376,14 +1504,27 @@ elif st.session_state.page == 4:
         }
 
         with st.spinner("Extracting causes with Claude and coding from file candidates..."):
-            st.session_state.icd_results = code_causes_hybrid_with_claude(
-                api_key=API_KEY,
-                narrative=fd["free_text"],
-                df_source=df_source,
-                faiss_index=faiss_index,
-                bm25=bm25,
-                patient_info=patient_info,
-            )
+            try:
+                st.session_state.icd_results = code_causes_hybrid_with_claude(
+                    api_key=API_KEY,
+                    narrative=fd["free_text"],
+                    df_source=df_source,
+                    faiss_index=faiss_index,
+                    bm25=bm25,
+                    patient_info=patient_info,
+                )
+            except Exception as e:
+                st.session_state.icd_results = {
+                    "concepts": {"part1_chain": [], "part2_conditions": []},
+                    "coded_causes": [],
+                    "validation": {
+                        "underlying_cause": "",
+                        "coding_issues": [f"System error during coding: {type(e).__name__}: {e}"],
+                        "who_notes": "",
+                        "overall_quality": "Needs Review",
+                    },
+                }
+                st.error(f"System error during coding: {type(e).__name__}: {e}")
 
     results = st.session_state.icd_results
     coded_causes = results["coded_causes"]
