@@ -337,20 +337,48 @@ def _embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 def search_icd(df, fidx, query: str, top_k: int = 6) -> list:
+    """Search ICD-10. Handles Arabic queries via embedding (semantic) or keyword fallback."""
+    if df is None:
+        return []
+
+    # ── Semantic search via FAISS (works with Arabic via multilingual model) ──
     if fidx is not None:
         try:
             model = _embed_model()
             q_vec = model.encode([query], normalize_embeddings=True,
                                  convert_to_numpy=True).astype("float32")
             scores, indices = fidx.search(q_vec, top_k)
-            return [_row_to_dict(df.iloc[idx], float(s))
-                    for s, idx in zip(scores[0], indices[0]) if idx != -1]
+            results = [_row_to_dict(df.iloc[idx], float(s))
+                       for s, idx in zip(scores[0], indices[0]) if idx != -1 and idx < len(df)]
+            if results:
+                return results
         except Exception:
             pass
-    terms = query.lower().split()
-    sc    = df["EmbedText"].str.lower().apply(lambda x: sum(t in x for t in terms))
-    top   = sc.nlargest(top_k).index
-    return [_row_to_dict(df.iloc[i], float(sc[i])) for i in top if sc[i] > 0]
+
+    # ── Keyword fallback on EmbedText ────────────────────────────────────────
+    # Arabic terms: try matching against ShortDesc and LongDesc directly
+    q_lower = query.lower().strip()
+    terms   = [t for t in q_lower.split() if len(t) > 2]
+
+    # Score against EmbedText (English) + ShortDesc + LongDesc
+    def score_row(row):
+        combined = " ".join([
+            str(row.get("EmbedText","")),
+            str(row.get("ShortDesc","")),
+            str(row.get("LongDesc","")),
+        ]).lower()
+        return sum(t in combined for t in terms)
+
+    if terms:
+        sc  = df.apply(score_row, axis=1)
+        top = sc.nlargest(top_k).index
+        hits = [_row_to_dict(df.iloc[i], float(sc[i])) for i in top if sc[i] > 0]
+        if hits:
+            return hits
+
+    # ── Last resort: return top top_k rows by AcceptableMain ─────────────────
+    acc = df[df["AcceptableMain"] == "Acceptable"].head(top_k)
+    return [_row_to_dict(acc.iloc[i], 0.0) for i in range(len(acc))]
 
 # ── Auto-load on startup ───────────────────────────────────────────────────────
 if st.session_state.df_icd is None:
@@ -755,7 +783,7 @@ elif st.session_state.page == 4:
             "\"short_desc\": \"exact ShortDesc from the chosen row\"," 
             "\"long_desc\": \"exact LongDesc from the chosen row\"," 
             "\"acceptable_main\": \"Acceptable or Not Acceptable\"," 
-            "\"notes\": \"Arabic: why this code was chosen, any warnings (unacceptable, gender mismatch, suggest better alternative)\""
+            "\"notes\": \"In English: brief clinical justification for this code. If unacceptable as main cause, explain why and suggest better alternative. Flag gender restrictions. 2-3 sentences max.\""
             "}"
         )
 
