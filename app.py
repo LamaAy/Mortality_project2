@@ -206,7 +206,7 @@ except Exception:
 # Set these two IDs once — the app downloads and caches the files automatically.
 # Find the ID in your Drive share link: drive.google.com/file/d/FILE_ID/view
 GDRIVE_EMBEDDINGS_ID = "1lSxHUBswhVtfTzDvbWHmsdmQIt0-Ne8J"   # embeddings.npy
-GDRIVE_METADATA_ID   = ""   # metadata.pkl — add your file ID here
+GDRIVE_METADATA_ID   = "1JM19CbSwtLgo7Uqeu_1MAnJuz-4m-hgJ"   # metadata.pkl
 CACHE_DIR            = os.path.join(os.path.expanduser("~"), ".icd10_cache")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
