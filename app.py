@@ -135,7 +135,8 @@ section[data-testid="stSidebar"] .stTextInput input {
   box-shadow: 0 0 0 2px rgba(0,105,64,.1) !important;
 }
 
-.stButton > button {
+.stButton > button,
+.stDownloadButton > button {
   background: linear-gradient(135deg, var(--green), var(--green-mid));
   color: white !important;
   border: none;
@@ -146,7 +147,8 @@ section[data-testid="stSidebar"] .stTextInput input {
   transition: box-shadow .2s, transform .15s;
   box-shadow: 0 2px 8px rgba(0,105,64,.25);
 }
-.stButton > button:hover {
+.stButton > button:hover,
+.stDownloadButton > button:hover {
   transform: translateY(-1px);
   box-shadow: 0 5px 14px rgba(0,105,64,.35);
 }
@@ -695,7 +697,6 @@ def _extract_text_from_claude_response(resp) -> str:
             parts.append(txt)
     return "\n".join(parts).strip()
 
-
 def _extract_json_candidate(text: str) -> str:
     if not text:
         return ""
@@ -720,7 +721,6 @@ def _extract_json_candidate(text: str) -> str:
 
     return text
 
-
 def _try_parse_json_loose(text: str):
     if not text:
         raise json.JSONDecodeError("Empty response", "", 0)
@@ -737,7 +737,6 @@ def _try_parse_json_loose(text: str):
     cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
 
     return json.loads(cleaned)
-
 
 def call_claude_json(
     api_key: str,
@@ -767,7 +766,6 @@ def call_claude_json(
             out["_error"] = f"{type(e).__name__}: {e}"
             return out
         raise
-
 
 def extract_causes_with_claude(api_key: str, narrative: str, patient_info: dict) -> dict:
     system_prompt = """
@@ -817,7 +815,6 @@ Narrative:
             "part2_conditions": [],
         },
     )
-
 
 def select_code_from_candidates_with_claude(
     api_key: str,
@@ -1293,7 +1290,13 @@ if st.session_state["df_source"] is None:
 # Step bar
 # =============================================================================
 def render_steps(current: int):
-    labels = ["Basic Information", "Medical History", "Cause Narrative", "Review & Coding"]
+    labels = [
+        "Basic Information",
+        "Medical History",
+        "Cause Narrative",
+        "Review & Coding",
+        "Final Certificate",
+    ]
     html_s = '<div class="step-bar">'
     for i, lbl in enumerate(labels, 1):
         cls = "step active" if i == current else ("step done" if i < current else "step")
@@ -1315,8 +1318,12 @@ if st.session_state.page == 1:
         full_name = st.text_input("Full Name*", placeholder="Mohammed Abdullah Al-Otaibi")
         national_id = st.text_input("National ID / Iqama*", placeholder="1XXXXXXXXX")
         nationality = st.text_input("Nationality", placeholder="Saudi")
-        dob = st.date_input("Date of Birth", value=datetime.date(1960, 1, 1),
-                            min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
+        dob = st.date_input(
+            "Date of Birth",
+            value=datetime.date(1960, 1, 1),
+            min_value=datetime.date(1900, 1, 1),
+            max_value=datetime.date.today()
+        )
     with c2:
         sex = st.selectbox("Sex*", ["Male", "Female"])
         marital_status = st.selectbox("Marital Status", ["Single", "Married", "Divorced", "Widowed"])
@@ -1795,13 +1802,302 @@ elif st.session_state.page == 4:
         st.json(concepts)
 
     st.markdown("---")
-    b1, b2, _ = st.columns([1, 1, 6])
+    b1, b2, b3, _ = st.columns([1, 1.3, 1.2, 5])
     with b1:
         if st.button("Back", use_container_width=True):
             st.session_state.page = 3
             st.session_state.icd_results = None
             st.rerun()
+
     with b2:
+        if st.button("Go to Final Certificate", use_container_width=True):
+            st.session_state.page = 5
+            st.rerun()
+
+    with b3:
+        if st.button("New Certificate", use_container_width=True):
+            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.session_state.page = 1
+            st.session_state.form_data = {}
+            st.session_state.icd_results = None
+            st.rerun()
+
+# =============================================================================
+# PAGE 5
+# =============================================================================
+elif st.session_state.page == 5:
+    render_steps(5)
+
+    fd = st.session_state.form_data
+    results = st.session_state.icd_results
+
+    if results is None:
+        st.error("No coded certificate data found.")
+        if st.button("Back to Review & Coding"):
+            st.session_state.page = 4
+            st.rerun()
+        st.stop()
+
+    coded_causes = results.get("coded_causes", [])
+    validation = results.get("validation", {})
+    concepts = results.get("concepts", {})
+
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+    part2 = [x for x in coded_causes if x["role"] == "other"]
+
+    cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
+    underlying_code = validation.get("underlying_cause", "—")
+    quality = validation.get("overall_quality", "Needs Review")
+    issues = validation.get("coding_issues", [])
+    who_notes = validation.get("who_notes", "")
+
+    quality_color = {
+        "Excellent": "#006940",
+        "Good": "#2d7a4f",
+        "Needs Review": "#c0392b"
+    }.get(quality, "#888")
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Final Death Certificate</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <div class="cert-preview">
+            <div style="display:flex;justify-content:space-between;align-items:center;
+                        border-bottom:2px solid var(--green);padding-bottom:1rem;margin-bottom:1.4rem;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div style="font-size:.95rem;font-weight:700;color:var(--green)">Kingdom of Saudi Arabia</div>
+                    <div style="font-size:.8rem;color:var(--muted)">Ministry of Health</div>
+                    <div style="font-size:.75rem;color:#888">{escape(hospital_name)} — {escape(hospital_city)}</div>
+                </div>
+                <div style="text-align:center">
+                    <div class="cert-title">Final Death Certificate</div>
+                    <div class="cert-sub">Complete physician review page</div>
+                    <div style="background:var(--green);color:white;border-radius:4px;padding:2px 10px;
+                                font-size:.76rem;margin-top:5px;display:inline-block">
+                        No: {escape(cert_no)}
+                    </div>
+                </div>
+                <div style="text-align:right">
+                    <div style="font-size:.95rem;font-weight:700;color:var(--green)">Saudi MOH</div>
+                    <div style="font-size:.8rem;color:var(--muted)">Final Review</div>
+                </div>
+            </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Patient Information")
+    p1, p2 = st.columns(2)
+    with p1:
+        st.write(f"**Full Name:** {fd.get('full_name', '—')}")
+        st.write(f"**National ID / Iqama:** {fd.get('national_id', '—')}")
+        st.write(f"**Nationality:** {fd.get('nationality', '—')}")
+        st.write(f"**Sex:** {fd.get('sex', '—')}")
+        st.write(f"**Age:** {fd.get('age_years', '—')} years")
+        st.write(f"**Date of Birth:** {fd.get('dob', '—')}")
+        st.write(f"**Marital Status:** {fd.get('marital_status', '—')}")
+        st.write(f"**Occupation:** {fd.get('occupation', '—')}")
+        st.write(f"**Address:** {fd.get('address', '—')}")
+    with p2:
+        st.write(f"**Date of Death:** {fd.get('dod', '—')}")
+        st.write(f"**Time of Death:** {fd.get('time_of_death', '—')}")
+        st.write(f"**Place of Death:** {fd.get('place_of_death', '—')}")
+        st.write(f"**Type of Death:** {fd.get('death_type', '—')}")
+        st.write(f"**Issue Date:** {fd.get('date_issued', '—')}")
+        st.write(f"**Certificate Number:** {cert_no}")
+        st.write(f"**Hospital Stay:** {fd.get('inpatient_days', '—')} days")
+        st.write(f"**Autopsy Required:** {fd.get('autopsy_required', '—')}")
+        st.write(f"**Recent Surgery:** {fd.get('had_surgery', '—')}")
+
+    st.markdown("---")
+    st.markdown("### Part I — Direct Causal Chain")
+
+    part1_rows = []
+    row_names = ["a", "b", "c", "d", "e"]
+    for i, item in enumerate(part1):
+        part1_rows.append({
+            "Line": row_names[i] if i < len(row_names) else str(i + 1),
+            "Cause": item.get("cause", ""),
+            "Interval": item.get("interval", "—"),
+            "ICD-10 Code": item.get("code_formatted", "—"),
+            "Disease Name": item.get("short_desc", "—"),
+            "Full Description": item.get("long_desc", "—"),
+            "Selection Status": item.get("selection_status", "—"),
+        })
+
+    if part1_rows:
+        st.dataframe(pd.DataFrame(part1_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No Part I causes available.")
+
+    st.markdown("### Part II — Other Significant Conditions")
+
+    part2_rows = []
+    for i, item in enumerate(part2, start=1):
+        part2_rows.append({
+            "No.": i,
+            "Condition": item.get("cause", ""),
+            "Interval": item.get("interval", "—"),
+            "ICD-10 Code": item.get("code_formatted", "—"),
+            "Disease Name": item.get("short_desc", "—"),
+            "Full Description": item.get("long_desc", "—"),
+            "Selection Status": item.get("selection_status", "—"),
+        })
+
+    if part2_rows:
+        st.dataframe(pd.DataFrame(part2_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No Part II conditions available.")
+
+    st.markdown("---")
+    st.markdown("### Validation Summary")
+
+    st.markdown(
+        f"""
+        <div style="background:white;border:2px solid {quality_color};border-radius:8px;
+                    padding:1rem 1.2rem;margin-bottom:1rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                <b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>
+                <span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">
+                    Underlying cause: {escape(underlying_code or "—")}
+                </span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if issues:
+        for issue in issues:
+            st.error(issue)
+    else:
+        st.success("No validation issues detected.")
+
+    if who_notes:
+        st.info(who_notes)
+
+    st.markdown("---")
+    st.markdown("### Physician / Hospital Information")
+    d1, d2 = st.columns(2)
+    with d1:
+        st.write(f"**Hospital Name:** {hospital_name}")
+        st.write(f"**City:** {hospital_city}")
+        st.write(f"**Certifying Physician:** {doctor_name or '________________________________'}")
+    with d2:
+        st.write("**Signature:** ______________________________")
+        st.write("**Official Stamp:** MOH Draft / Final Review")
+
+    st.markdown("---")
+    st.markdown("### Original Narrative")
+    st.text_area(
+        "Cause Narrative Used for Extraction",
+        value=fd.get("free_text", ""),
+        height=180,
+        disabled=True,
+    )
+
+    st.markdown("### Claude Extracted Structure")
+    st.json(concepts)
+
+    final_lines = [
+        "FINAL DEATH CERTIFICATE",
+        f"Certificate No: {cert_no}",
+        "=" * 80,
+        f"Hospital: {hospital_name}",
+        f"City: {hospital_city}",
+        f"Certifying Physician: {doctor_name}",
+        "",
+        "PATIENT INFORMATION",
+        f"Full Name: {fd.get('full_name', '')}",
+        f"National ID / Iqama: {fd.get('national_id', '')}",
+        f"Nationality: {fd.get('nationality', '')}",
+        f"Sex: {fd.get('sex', '')}",
+        f"Age: {fd.get('age_years', '')} years",
+        f"Date of Birth: {fd.get('dob', '')}",
+        f"Date of Death: {fd.get('dod', '')}",
+        f"Time of Death: {fd.get('time_of_death', '')}",
+        f"Place of Death: {fd.get('place_of_death', '')}",
+        f"Type of Death: {fd.get('death_type', '')}",
+        f"Marital Status: {fd.get('marital_status', '')}",
+        f"Occupation: {fd.get('occupation', '')}",
+        f"Address: {fd.get('address', '')}",
+        "",
+        "PART I - DIRECT CAUSAL CHAIN",
+    ]
+
+    for i, item in enumerate(part1):
+        line_label = row_names[i] if i < len(row_names) else str(i + 1)
+        final_lines.append(
+            f"{line_label}) {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
+            f"ICD: {item.get('code_formatted', '')} | {item.get('short_desc', '')}"
+        )
+
+    final_lines.append("")
+    final_lines.append("PART II - OTHER SIGNIFICANT CONDITIONS")
+    if part2:
+        for item in part2:
+            final_lines.append(
+                f"- {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
+                f"ICD: {item.get('code_formatted', '')} | {item.get('short_desc', '')}"
+            )
+    else:
+        final_lines.append("None documented.")
+
+    final_lines += [
+        "",
+        "VALIDATION",
+        f"Overall Quality: {quality}",
+        f"Underlying Cause: {underlying_code}",
+        "",
+        "ISSUES",
+    ]
+
+    if issues:
+        for issue in issues:
+            final_lines.append(f"- {issue}")
+    else:
+        final_lines.append("- No issues detected.")
+
+    final_lines += [
+        "",
+        "WHO NOTE",
+        who_notes,
+        "",
+        "ORIGINAL NARRATIVE",
+        fd.get("free_text", ""),
+        "",
+        f"Issue Date: {fd.get('date_issued', '')}",
+        f"Physician: {doctor_name}",
+    ]
+
+    st.download_button(
+        "Download Final Certificate Summary",
+        data="\n".join(final_lines).encode("utf-8"),
+        file_name=f"{sanitize_filename('final_death_certificate_' + cert_no)}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    b1, b2, b3, _ = st.columns([1, 1, 1.2, 5])
+
+    with b1:
+        if st.button("Back to Review", use_container_width=True):
+            st.session_state.page = 4
+            st.rerun()
+
+    with b2:
+        if st.button("Edit Narrative", use_container_width=True):
+            st.session_state.page = 3
+            st.rerun()
+
+    with b3:
         if st.button("New Certificate", use_container_width=True):
             keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
             for k in keys_to_remove:
