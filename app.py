@@ -856,6 +856,11 @@ elif st.session_state.page == 4:
             "concepts":     concepts,
             "coded_causes": coded_causes,
         }
+        # Pre-populate widget keys so values show after rerun
+        for _i, _item in enumerate(coded_causes):
+            st.session_state["code_"  + str(_i)] = _item.get("code_formatted","")
+            st.session_state["short_" + str(_i)] = _item.get("short_desc","")
+            st.session_state["long_"  + str(_i)] = _item.get("long_desc","")
         st.rerun()
 
     # ── Display results ───────────────────────────────────────────────────────
@@ -869,56 +874,46 @@ elif st.session_state.page == 4:
         role_label_en = {"immediate": "Immediate Cause", "contributing": "Contributing Cause", "other": "Other Condition"}
 
         for idx, item in enumerate(coded_causes):
-            acc    = item.get("acceptable_main", "")
-            bg_acc = "#006940" if acc == "Acceptable" else ("#c0392b" if acc else "#888")
-            acc_en = "✓ Acceptable as main cause" if acc == "Acceptable" else ("✗ Not acceptable as main cause" if acc else "Unknown")
-            rc     = role_hdr.get(item["role"], "#555")
+            acc     = item.get("acceptable_main", "")
+            bg_acc  = "#006940" if acc == "Acceptable" else ("#c0392b" if acc else "#888")
+            acc_en  = "✓ Acceptable as main cause" if acc == "Acceptable" else ("✗ Not acceptable as main cause" if acc else "Unknown")
+            rc      = role_hdr.get(item["role"], "#555")
             role_en = role_label_en.get(item["role"], item["label"])
-
-            # Only show badge on immediate cause (doctor already decided to enter others)
             show_badge = (item["role"] == "immediate")
 
-            # header
+            code_val  = item.get("code_formatted","") or item.get("selected_code","")
+            short_val = item.get("short_desc","")
+            long_val  = item.get("long_desc","")
+            notes_val = item.get("notes","")
+
+            notes_bg     = "#fff5f5" if acc != "Acceptable" else "#f0faf4"
+            notes_border = "#e8b4b8" if acc != "Acceptable" else "#9ecaad"
+
+            badge_html = (
+                '<span style="background:' + bg_acc + ';color:white;border-radius:4px;'                'padding:3px 10px;font-size:.72rem;font-weight:700;display:inline-block;margin-top:4px">'                + acc_en + '</span>') if show_badge else ""
+
+            # Render entire card as one HTML block — avoids Streamlit widget key caching issue
             st.markdown(
-                '<div style="border:1.5px solid #c8dece;border-radius:8px;margin-bottom:1.4rem;overflow:hidden">'                '<div style="background:' + rc + ';color:white;padding:.5rem 1rem;font-size:.84rem;font-weight:700">'                + role_en + ' — ' + item["cause"]                + ' <span style="opacity:.75;font-weight:400"> | Interval: ' + item["interval"] + '</span></div>',
+                '<div style="border:1.5px solid #c8dece;border-radius:8px;'                'margin-bottom:1.4rem;overflow:hidden">'                '<div style="background:' + rc + ';color:white;padding:.5rem 1rem;'                'font-size:.84rem;font-weight:700">'                + role_en + ' — ' + item["cause"]                + ' <span style="opacity:.75;font-weight:400;font-size:.78rem"> | Interval: '                + item["interval"] + '</span></div>'                '<div style="display:grid;grid-template-columns:1fr 1.6fr 2.6fr 2.4fr;'                'gap:0;border-top:0">'
+                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;'                'text-transform:uppercase;letter-spacing:.04em">ICD-10 Code</div>'                '<div style="font-size:1.05rem;font-weight:800;color:var(--green);letter-spacing:.03em">'                + (code_val if code_val else '<span style="color:#bbb;font-style:italic">—</span>') + '</div>'                + badge_html + '</div>'
+                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;'                'text-transform:uppercase;letter-spacing:.04em">Disease Name</div>'                '<div style="font-size:.85rem;color:#1a2e1a;line-height:1.45">'                + (short_val if short_val else '<span style="color:#bbb;font-style:italic">—</span>') + '</div></div>'
+                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;'                'text-transform:uppercase;letter-spacing:.04em">Full Description</div>'                '<div style="font-size:.82rem;color:#2a3a2a;line-height:1.5">'                + (long_val if long_val else '<span style="color:#bbb;font-style:italic">—</span>') + '</div></div>'
+                '<div style="padding:.7rem .9rem;background:' + notes_bg + '">'                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;'                'text-transform:uppercase;letter-spacing:.04em">Coding Notes</div>'                '<div style="font-size:.81rem;color:#1a2e1a;line-height:1.6;border:1px solid '                + notes_border + ';border-radius:5px;padding:.4rem .6rem;background:white">'                + (notes_val if notes_val else '<span style="color:#bbb;font-style:italic">—</span>') + '</div></div>'
+                '</div></div>',
                 unsafe_allow_html=True)
 
-            c1, c2, c3, c4 = st.columns([1.1, 1.7, 2.7, 2.5])
+            # Keep editable ICD code as a separate widget below the card
+            new_code = st.text_input(
+                "Edit ICD-10 code for: " + item["cause"][:35],
+                value=code_val,
+                key="code_edit_" + str(idx),
+                label_visibility="collapsed",
+                placeholder="Edit code if needed: e.g. I21.0",
+            )
+            # Save edits back to session state
+            if new_code != code_val:
+                st.session_state.icd_results["coded_causes"][idx]["code_formatted"] = new_code
 
-            with c1:
-                code_val = item.get("code_formatted", "") or item.get("selected_code", "")
-                st.text_input("ICD-10 Code", value=code_val, key="code_" + str(idx))
-                if show_badge:
-                    st.markdown(
-                        '<span style="background:' + bg_acc + ';color:white;border-radius:4px;'                        'padding:2px 9px;font-size:.72rem;font-weight:700">' + acc_en + '</span>',
-                        unsafe_allow_html=True)
-
-            with c2:
-                st.text_input(
-                    "Disease Name",
-                    value=item.get("short_desc", ""),
-                    key="short_" + str(idx),
-                    disabled=True,
-                )
-
-            with c3:
-                st.text_area(
-                    "Full Description",
-                    value=item.get("long_desc", ""),
-                    key="long_" + str(idx),
-                    height=105,
-                    disabled=True,
-                )
-
-            with c4:
-                notes_val    = item.get("notes", "")
-                notes_bg     = "#fff5f5" if acc != "Acceptable" else "#f0faf4"
-                notes_border = "#e8b4b8" if acc != "Acceptable" else "#9ecaad"
-                st.markdown(
-                    '<div style="background:' + notes_bg + ';border:1px solid ' + notes_border                    + ';border-radius:6px;padding:.6rem .8rem;font-size:.82rem;'                    'color:#1a2e1a;min-height:105px;line-height:1.65">'                    '<div style="font-weight:700;color:var(--green);margin-bottom:.35rem">Coding Notes</div>'                    + notes_val + '</div>',
-                    unsafe_allow_html=True)
-
-            st.markdown('</div>', unsafe_allow_html=True)
 
     with tab_cert:
         cert_no  = (fd.get("cert_number")
