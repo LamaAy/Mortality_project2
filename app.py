@@ -185,6 +185,21 @@ section[data-testid="stSidebar"] .stTextInput input {
   color:var(--green); font-weight:700; text-align:center; font-size:.65rem; line-height:1.5;
 }
 
+.final-block {
+  border:1px solid #d8e6db;
+  border-radius:6px;
+  padding:.8rem 1rem;
+  margin-bottom:.7rem;
+  background:#f9fcfa;
+}
+.final-block-secondary {
+  border:1px solid #d8e6db;
+  border-radius:6px;
+  padding:.8rem 1rem;
+  margin-bottom:.7rem;
+  background:#fcfcfd;
+}
+
 .stTabs [data-baseweb="tab"] { font-weight:600; font-size:.88rem; }
 .stTabs [aria-selected="true"] { color:var(--green) !important; border-bottom-color:var(--green) !important; }
 </style>
@@ -755,9 +770,7 @@ def call_claude_json(
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
-
         raw_text = _extract_text_from_claude_response(resp)
-        print("Claude raw response:", raw_text)
         return _try_parse_json_loose(raw_text)
 
     except Exception as e:
@@ -1803,6 +1816,7 @@ elif st.session_state.page == 4:
 
     st.markdown("---")
     b1, b2, b3, _ = st.columns([1, 1.3, 1.2, 5])
+
     with b1:
         if st.button("Back", use_container_width=True):
             st.session_state.page = 3
@@ -1848,15 +1862,15 @@ elif st.session_state.page == 5:
     part2 = [x for x in coded_causes if x["role"] == "other"]
 
     cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
-    underlying_code = validation.get("underlying_cause", "—")
     quality = validation.get("overall_quality", "Needs Review")
     issues = validation.get("coding_issues", [])
     who_notes = validation.get("who_notes", "")
+    underlying_code = validation.get("underlying_cause") or "Pending manual review"
 
     quality_color = {
         "Excellent": "#006940",
         "Good": "#2d7a4f",
-        "Needs Review": "#c0392b"
+        "Needs Review": "#c0392b",
     }.get(quality, "#888")
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -1915,40 +1929,68 @@ elif st.session_state.page == 5:
     st.markdown("---")
     st.markdown("### Part I — Direct Causal Chain")
 
-    part1_rows = []
-    row_names = ["a", "b", "c", "d", "e"]
-    for i, item in enumerate(part1):
-        part1_rows.append({
-            "Line": row_names[i] if i < len(row_names) else str(i + 1),
-            "Cause": item.get("cause", ""),
-            "Interval": item.get("interval", "—"),
-            "ICD-10 Code": item.get("code_formatted", "—"),
-            "Disease Name": item.get("short_desc", "—"),
-            "Full Description": item.get("long_desc", "—"),
-            "Selection Status": item.get("selection_status", "—"),
-        })
+    row_names = ["(a)", "(b)", "(c)", "(d)", "(e)"]
+    part1_html = ""
 
-    if part1_rows:
-        st.dataframe(pd.DataFrame(part1_rows), use_container_width=True, hide_index=True)
+    for i, item in enumerate(part1):
+        row_label = row_names[i] if i < len(row_names) else f"({i+1})"
+        code_display = item.get("code_formatted") or "Pending manual review"
+        short_display = item.get("short_desc") or "Pending manual review"
+        long_display = item.get("long_desc") or "Pending manual review"
+        status_display = item.get("selection_status", "—")
+
+        part1_html += f"""
+        <div class="final-block">
+            <div style="font-weight:700;color:#006940;margin-bottom:.35rem">
+                {escape(row_label)} {"Immediate cause" if i == 0 else "Due to"}
+            </div>
+            <div style="font-size:.95rem;color:#1a2e1a;margin-bottom:.25rem">
+                {escape(item.get("cause", "—"))}
+            </div>
+            <div style="font-size:.82rem;color:#4b5f50;line-height:1.7">
+                <b>Interval:</b> {escape(item.get("interval", "—"))}<br>
+                <b>ICD-10 Code:</b> {escape(code_display)}<br>
+                <b>Disease Name:</b> {escape(short_display)}<br>
+                <b>Full Description:</b> {escape(long_display)}<br>
+                <b>Status:</b> {escape(status_display)}
+            </div>
+        </div>
+        """
+
+    if part1_html:
+        st.markdown(part1_html, unsafe_allow_html=True)
     else:
         st.info("No Part I causes available.")
 
     st.markdown("### Part II — Other Significant Conditions")
 
-    part2_rows = []
+    part2_html = ""
     for i, item in enumerate(part2, start=1):
-        part2_rows.append({
-            "No.": i,
-            "Condition": item.get("cause", ""),
-            "Interval": item.get("interval", "—"),
-            "ICD-10 Code": item.get("code_formatted", "—"),
-            "Disease Name": item.get("short_desc", "—"),
-            "Full Description": item.get("long_desc", "—"),
-            "Selection Status": item.get("selection_status", "—"),
-        })
+        code_display = item.get("code_formatted") or "Pending manual review"
+        short_display = item.get("short_desc") or "Pending manual review"
+        long_display = item.get("long_desc") or "Pending manual review"
+        status_display = item.get("selection_status", "—")
 
-    if part2_rows:
-        st.dataframe(pd.DataFrame(part2_rows), use_container_width=True, hide_index=True)
+        part2_html += f"""
+        <div class="final-block-secondary">
+            <div style="font-weight:700;color:#355c7d;margin-bottom:.35rem">
+                Other condition ({i})
+            </div>
+            <div style="font-size:.95rem;color:#1a2e1a;margin-bottom:.25rem">
+                {escape(item.get("cause", "—"))}
+            </div>
+            <div style="font-size:.82rem;color:#4b5f50;line-height:1.7">
+                <b>Interval:</b> {escape(item.get("interval", "—"))}<br>
+                <b>ICD-10 Code:</b> {escape(code_display)}<br>
+                <b>Disease Name:</b> {escape(short_display)}<br>
+                <b>Full Description:</b> {escape(long_display)}<br>
+                <b>Status:</b> {escape(status_display)}
+            </div>
+        </div>
+        """
+
+    if part2_html:
+        st.markdown(part2_html, unsafe_allow_html=True)
     else:
         st.info("No Part II conditions available.")
 
@@ -1962,7 +2004,7 @@ elif st.session_state.page == 5:
             <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
                 <b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>
                 <span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">
-                    Underlying cause: {escape(underlying_code or "—")}
+                    Underlying cause: {escape(underlying_code)}
                 </span>
             </div>
         </div>
@@ -1999,8 +2041,8 @@ elif st.session_state.page == 5:
         disabled=True,
     )
 
-    st.markdown("### Claude Extracted Structure")
-    st.json(concepts)
+    with st.expander("Show extracted structure (debug)"):
+        st.json(concepts)
 
     final_lines = [
         "FINAL DEATH CERTIFICATE",
@@ -2031,8 +2073,9 @@ elif st.session_state.page == 5:
     for i, item in enumerate(part1):
         line_label = row_names[i] if i < len(row_names) else str(i + 1)
         final_lines.append(
-            f"{line_label}) {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
-            f"ICD: {item.get('code_formatted', '')} | {item.get('short_desc', '')}"
+            f"{line_label} {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
+            f"ICD: {item.get('code_formatted') or 'Pending manual review'} | "
+            f"{item.get('short_desc') or 'Pending manual review'}"
         )
 
     final_lines.append("")
@@ -2041,7 +2084,8 @@ elif st.session_state.page == 5:
         for item in part2:
             final_lines.append(
                 f"- {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
-                f"ICD: {item.get('code_formatted', '')} | {item.get('short_desc', '')}"
+                f"ICD: {item.get('code_formatted') or 'Pending manual review'} | "
+                f"{item.get('short_desc') or 'Pending manual review'}"
             )
     else:
         final_lines.append("None documented.")
