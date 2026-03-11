@@ -20,6 +20,7 @@ import os
 import pickle
 import html
 import json
+import io
 from typing import List, Dict, Tuple, Optional
 
 import anthropic
@@ -749,7 +750,7 @@ def _try_parse_json_loose(text: str):
 
     cleaned = candidate.strip()
     cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
-    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+    cleaned = cleaned.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
 
     return json.loads(cleaned)
 
@@ -1187,6 +1188,377 @@ def refresh_code_from_manual_edit(df_source: pd.DataFrame, item: Dict, new_code:
         updated["selection_notes"] = "Manual code conflicts with sex restriction."
 
     return updated
+
+# =============================================================================
+# PDF Generation
+# =============================================================================
+def generate_certificate_pdf(
+    fd: dict,
+    coded_causes: List[Dict],
+    validation: dict,
+    hospital_name: str,
+    hospital_city: str,
+    doctor_name: str,
+) -> bytes:
+    """Generate a professional PDF death certificate using reportlab."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, KeepTogether
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+    GREEN       = colors.HexColor("#006940")
+    GOLD        = colors.HexColor("#C8A951")
+    LIGHT_GREEN = colors.HexColor("#e8f5ee")
+    LIGHT_BLUE  = colors.HexColor("#f0f4ff")
+    DARK_NAVY   = colors.HexColor("#1a4a7a")
+    LIGHT_GRAY  = colors.HexColor("#f7faf8")
+    MID_GRAY    = colors.HexColor("#5a7060")
+    BORDER_CLR  = colors.HexColor("#c8dece")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title="Death Certificate - Saudi MOH",
+    )
+
+    styles = getSampleStyleSheet()
+    W = A4[0] - 36 * mm  # usable width
+
+    def S(name, **kw):
+        base = styles.get(name, styles["Normal"])
+        return ParagraphStyle(name + "_custom_" + str(id(kw)), parent=base, **kw)
+
+    title_style   = S("Title",   fontSize=16, textColor=GREEN,    fontName="Helvetica-Bold",   alignment=TA_CENTER, spaceAfter=2)
+    subtitle_style= S("Normal",  fontSize=9,  textColor=MID_GRAY, fontName="Helvetica",        alignment=TA_CENTER, spaceAfter=1)
+    h2_style      = S("Normal",  fontSize=10, textColor=GREEN,    fontName="Helvetica-Bold",   spaceAfter=4, spaceBefore=8)
+    h3_style      = S("Normal",  fontSize=9,  textColor=DARK_NAVY,fontName="Helvetica-Bold",   spaceAfter=2, spaceBefore=4)
+    normal_style  = S("Normal",  fontSize=8.5,textColor=colors.black, fontName="Helvetica",    spaceAfter=2)
+    small_style   = S("Normal",  fontSize=7.5,textColor=MID_GRAY, fontName="Helvetica",        spaceAfter=1)
+    label_style   = S("Normal",  fontSize=8,  textColor=GREEN,    fontName="Helvetica-Bold",   spaceAfter=0)
+    value_style   = S("Normal",  fontSize=8.5,textColor=colors.black, fontName="Helvetica",    spaceAfter=0)
+    code_style    = S("Normal",  fontSize=10, textColor=GREEN,    fontName="Helvetica-Bold",   spaceAfter=0)
+    cause_style   = S("Normal",  fontSize=9,  textColor=colors.black, fontName="Helvetica-Bold", spaceAfter=1)
+    desc_style    = S("Normal",  fontSize=8,  textColor=MID_GRAY, fontName="Helvetica",        spaceAfter=0)
+    center_style  = S("Normal",  fontSize=8,  textColor=colors.black, fontName="Helvetica",    alignment=TA_CENTER)
+    right_style   = S("Normal",  fontSize=8,  textColor=colors.black, fontName="Helvetica",    alignment=TA_RIGHT)
+
+    story = []
+
+    # ── Header banner (table with green bg) ──────────────────────────────────
+    cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{str(fd.get('national_id', ''))[-4:]}"
+
+    header_data = [[
+        Paragraph("Kingdom of Saudi Arabia<br/><font size='8'>Ministry of Health</font>", S("Normal", fontSize=10, textColor=colors.white, fontName="Helvetica-Bold")),
+        Paragraph(
+            "<font size='14'><b>DEATH CERTIFICATE</b></font><br/>"
+            "<font size='8'>Electronic ICD-10 Coding System</font><br/>"
+            f"<font size='8'>Certificate No: {cert_no}</font>",
+            S("Normal", fontSize=8, textColor=colors.white, fontName="Helvetica", alignment=TA_CENTER)
+        ),
+        Paragraph(f"<font size='9'><b>{hospital_name}</b></font><br/><font size='8'>{hospital_city}</font>", S("Normal", fontSize=9, textColor=colors.white, fontName="Helvetica-Bold", alignment=TA_RIGHT)),
+    ]]
+    header_table = Table(header_data, colWidths=[W * 0.3, W * 0.4, W * 0.3])
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND",  (0, 0), (-1, -1), GREEN),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+        ("TOPPADDING",    (0,0),(-1,-1), 10),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+        ("LINEBELOW", (0,0),(-1,-1), 2.5, GOLD),
+        ("VALIGN", (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 6 * mm))
+
+    # ── Patient Information ───────────────────────────────────────────────────
+    story.append(Paragraph("PATIENT INFORMATION", h2_style))
+    story.append(HRFlowable(width=W, thickness=1, color=GREEN, spaceAfter=4))
+
+    def prow(label, val):
+        return [Paragraph(label, label_style), Paragraph(str(val) if val else "—", value_style)]
+
+    dob = fd.get("dob", "—")
+    dod = fd.get("dod", "—")
+    age = fd.get("age_years", "—")
+    sex = fd.get("sex", "—")
+
+    patient_rows = [
+        prow("Full Name:", fd.get("full_name", "")),
+        prow("National ID / Iqama:", fd.get("national_id", "")),
+        prow("Nationality:", fd.get("nationality", "")),
+        prow("Date of Birth:", dob),
+        prow("Sex:", sex),
+        prow("Age at Death:", f"{age} years"),
+        prow("Marital Status:", fd.get("marital_status", "")),
+        prow("Occupation:", fd.get("occupation", "")),
+        prow("Address:", fd.get("address", "")),
+    ]
+
+    # Two-column layout for patient info
+    left_rows  = patient_rows[:5]
+    right_rows = patient_rows[5:]
+
+    def mini_table(rows):
+        t = Table(rows, colWidths=[W * 0.18, W * 0.32])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(0,-1), LIGHT_GREEN),
+            ("ROWBACKGROUNDS", (0,0),(-1,-1), [colors.white, LIGHT_GRAY]),
+            ("GRID", (0,0),(-1,-1), 0.3, BORDER_CLR),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("TOPPADDING",    (0,0),(-1,-1), 3),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 3),
+        ]))
+        return t
+
+    death_rows = [
+        prow("Date of Death:", dod),
+        prow("Time of Death:", fd.get("time_of_death", "")),
+        prow("Place of Death:", fd.get("place_of_death", "")),
+        prow("Type of Death:", fd.get("death_type", "")),
+        prow("Hospital Stay:", f"{fd.get('inpatient_days', '—')} days"),
+        prow("Autopsy Required:", fd.get("autopsy_required", "")),
+        prow("Recent Surgery:", fd.get("had_surgery", "")),
+        prow("Certificate No:", cert_no),
+        prow("Issue Date:", fd.get("date_issued", "")),
+    ]
+
+    two_col = Table(
+        [[mini_table(left_rows), mini_table(death_rows)]],
+        colWidths=[W * 0.5 - 3, W * 0.5 - 3],
+        hAlign="LEFT"
+    )
+    two_col.setStyle(TableStyle([
+        ("VALIGN", (0,0),(-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("RIGHTPADDING", (0,0),(-1,-1), 0),
+        ("INNERGRID", (0,0),(-1,-1), 0, colors.white),
+        ("BOX",       (0,0),(-1,-1), 0, colors.white),
+    ]))
+    story.append(two_col)
+    story.append(Spacer(1, 5 * mm))
+
+    # ── Part I ────────────────────────────────────────────────────────────────
+    story.append(Paragraph("PART I — DIRECT CAUSAL SEQUENCE OF DEATH", h2_style))
+    story.append(HRFlowable(width=W, thickness=1, color=GREEN, spaceAfter=4))
+    story.append(Paragraph(
+        "Diseases or conditions directly leading to death, in order from immediate cause to underlying cause.",
+        small_style
+    ))
+    story.append(Spacer(1, 2 * mm))
+
+    row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+    part2 = [x for x in coded_causes if x["role"] == "other"]
+
+    for i, item in enumerate(part1):
+        lbl = row_labels[i] if i < len(row_labels) else f"({i+1})"
+        role_text = "Immediate cause of death" if i == 0 else f"Due to (antecedent cause)"
+        code_val  = item.get("code_formatted") or "— Pending review"
+        short_val = item.get("short_desc") or ""
+        cause_val = item.get("cause") or "—"
+        intv_val  = item.get("interval") or "—"
+
+        block_data = [[
+            Paragraph(f"<b>{lbl} {role_text}</b>", h3_style),
+            Paragraph(f"<b>Interval:</b> {intv_val}", S("Normal", fontSize=8, textColor=MID_GRAY, fontName="Helvetica", alignment=TA_RIGHT)),
+        ]]
+        block_header = Table(block_data, colWidths=[W * 0.7, W * 0.3])
+        block_header.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(-1,-1), LIGHT_GREEN),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 6),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 6),
+            ("VALIGN", (0,0),(-1,-1), "MIDDLE"),
+        ]))
+
+        body_data = [[
+            Paragraph(cause_val, cause_style),
+            Paragraph(f"<b>{code_val}</b>", code_style),
+        ]]
+        body_table = Table(body_data, colWidths=[W * 0.62, W * 0.38])
+        body_table.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), colors.white),
+            ("TOPPADDING",    (0,0),(-1,-1), 6),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(0,-1),  6),
+            ("LEFTPADDING",   (1,0),(1,-1),  10),
+            ("VALIGN", (0,0),(-1,-1), "TOP"),
+        ]))
+
+        if short_val:
+            desc_data = [[Paragraph(short_val, desc_style)]]
+            desc_table = Table(desc_data, colWidths=[W])
+            desc_table.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,-1), colors.white),
+                ("TOPPADDING",    (0,0),(-1,-1), 0),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+                ("LEFTPADDING",   (0,0),(-1,-1), 6),
+            ]))
+            combined = KeepTogether([block_header, body_table, desc_table,
+                                     Table([[""]], colWidths=[W],
+                                           style=[("LINEBELOW",(0,0),(-1,-1),0.5,BORDER_CLR),
+                                                  ("TOPPADDING",(0,0),(-1,-1),0),
+                                                  ("BOTTOMPADDING",(0,0),(-1,-1),2)])])
+        else:
+            combined = KeepTogether([block_header, body_table,
+                                     Table([[""]], colWidths=[W],
+                                           style=[("LINEBELOW",(0,0),(-1,-1),0.5,BORDER_CLR),
+                                                  ("TOPPADDING",(0,0),(-1,-1),0),
+                                                  ("BOTTOMPADDING",(0,0),(-1,-1),2)])])
+        story.append(combined)
+        story.append(Spacer(1, 1 * mm))
+
+    if not part1:
+        story.append(Paragraph("No Part I causes documented.", small_style))
+
+    story.append(Spacer(1, 4 * mm))
+
+    # ── Part II ───────────────────────────────────────────────────────────────
+    story.append(Paragraph("PART II — OTHER SIGNIFICANT CONDITIONS", h2_style))
+    story.append(HRFlowable(width=W, thickness=1, color=DARK_NAVY, spaceAfter=4))
+    story.append(Paragraph(
+        "Other significant conditions contributing to death but not related to the direct causal sequence.",
+        small_style
+    ))
+    story.append(Spacer(1, 2 * mm))
+
+    if part2:
+        p2_rows = [
+            [
+                Paragraph(f"<b>({i+1})</b>", S("Normal", fontSize=8, fontName="Helvetica-Bold", textColor=DARK_NAVY)),
+                Paragraph(item.get("cause") or "—", normal_style),
+                Paragraph(f"<b>{item.get('code_formatted') or '—'}</b>", S("Normal", fontSize=9, fontName="Helvetica-Bold", textColor=DARK_NAVY)),
+                Paragraph(item.get("short_desc") or "", small_style),
+                Paragraph(item.get("interval") or "—", small_style),
+            ]
+            for i, item in enumerate(part2)
+        ]
+        header_row = [[
+            Paragraph("#", label_style),
+            Paragraph("Condition", label_style),
+            Paragraph("ICD-10", label_style),
+            Paragraph("Description", label_style),
+            Paragraph("Interval", label_style),
+        ]]
+        p2_table = Table(header_row + p2_rows, colWidths=[W*0.05, W*0.32, W*0.13, W*0.35, W*0.15])
+        p2_table.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  LIGHT_BLUE),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, LIGHT_GRAY]),
+            ("GRID", (0,0),(-1,-1), 0.3, BORDER_CLR),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("VALIGN", (0,0),(-1,-1), "TOP"),
+        ]))
+        story.append(p2_table)
+    else:
+        story.append(Paragraph("None documented.", small_style))
+
+    story.append(Spacer(1, 5 * mm))
+
+    # ── Underlying Cause Banner ───────────────────────────────────────────────
+    underlying_code = validation.get("underlying_cause") or "Pending manual review"
+    quality         = validation.get("overall_quality", "Needs Review")
+    q_color         = {"Excellent": colors.HexColor("#006940"), "Good": colors.HexColor("#2d7a4f")}.get(quality, colors.HexColor("#c0392b"))
+
+    uc_data = [[
+        Paragraph("Underlying Cause (for mortality statistics):", S("Normal", fontSize=9, textColor=colors.white, fontName="Helvetica-Bold")),
+        Paragraph(f"<b>{underlying_code}</b>", S("Normal", fontSize=13, textColor=GOLD, fontName="Helvetica-Bold", alignment=TA_RIGHT)),
+    ]]
+    uc_table = Table(uc_data, colWidths=[W * 0.65, W * 0.35])
+    uc_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), GREEN),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+        ("VALIGN", (0,0),(-1,-1), "MIDDLE"),
+        ("LINEBELOW", (0,0),(-1,-1), 2, GOLD),
+    ]))
+    story.append(uc_table)
+    story.append(Spacer(1, 4 * mm))
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    issues = validation.get("coding_issues", [])
+    story.append(Paragraph("VALIDATION SUMMARY", h2_style))
+    story.append(HRFlowable(width=W, thickness=1, color=q_color, spaceAfter=3))
+
+    qual_data = [[Paragraph(f"Overall Quality: <b>{quality}</b>", S("Normal", fontSize=9, textColor=q_color, fontName="Helvetica-Bold"))]]
+    qual_table = Table(qual_data, colWidths=[W])
+    qual_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), colors.white),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+        ("BOX", (0,0),(-1,-1), 1, q_color),
+    ]))
+    story.append(qual_table)
+    story.append(Spacer(1, 2 * mm))
+
+    if issues:
+        for iss in issues:
+            story.append(Paragraph(f"• {iss}", S("Normal", fontSize=8, textColor=colors.HexColor("#c0392b"), fontName="Helvetica", leftIndent=10, spaceAfter=2)))
+    else:
+        story.append(Paragraph("No validation issues detected.", S("Normal", fontSize=8, textColor=GREEN, fontName="Helvetica", spaceAfter=2)))
+
+    who = validation.get("who_notes", "")
+    if who:
+        story.append(Spacer(1, 2 * mm))
+        story.append(Paragraph(f"<i>WHO Note: {who}</i>", small_style))
+
+    story.append(Spacer(1, 6 * mm))
+
+    # ── Signature block ───────────────────────────────────────────────────────
+    story.append(HRFlowable(width=W, thickness=0.5, color=BORDER_CLR, spaceAfter=4))
+    sig_data = [[
+        Paragraph(
+            f"<b>Certifying Physician:</b><br/>{doctor_name or '________________________________'}<br/><br/>"
+            f"Signature: ______________________________",
+            S("Normal", fontSize=8, fontName="Helvetica", textColor=colors.black)
+        ),
+        Paragraph(
+            "<b>MOH Official</b><br/>Draft / Final Review",
+            center_style
+        ),
+        Paragraph(
+            f"<b>Issue Date:</b> {fd.get('date_issued', '')}<br/><br/>"
+            f"<b>Hospital Stamp:</b><br/>______________________",
+            right_style
+        ),
+    ]]
+    sig_table = Table(sig_data, colWidths=[W * 0.4, W * 0.2, W * 0.4])
+    sig_table.setStyle(TableStyle([
+        ("VALIGN",        (0,0),(-1,-1), "TOP"),
+        ("TOPPADDING",    (0,0),(-1,-1), 6),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+        ("LEFTPADDING",   (0,0),(-1,-1), 4),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 4),
+    ]))
+    story.append(sig_table)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    story.append(HRFlowable(width=W, thickness=0.5, color=GOLD, spaceAfter=3))
+    story.append(Paragraph(
+        f"Ministry of Health | Kingdom of Saudi Arabia | Generated: {datetime.date.today()}",
+        S("Normal", fontSize=7, textColor=MID_GRAY, fontName="Helvetica", alignment=TA_CENTER)
+    ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
 
 # =============================================================================
 # Sidebar
@@ -1804,7 +2176,7 @@ elif st.session_state.page == 4:
         ]
 
         st.download_button(
-            "Download Certificate Summary",
+            "Download Certificate Summary (.txt)",
             data="\n".join(cert_lines).encode("utf-8"),
             file_name=f"{sanitize_filename('death_cert_' + cert_no_safe)}.txt",
             mime="text/plain",
@@ -1839,7 +2211,7 @@ elif st.session_state.page == 4:
             st.rerun()
 
 # =============================================================================
-# PAGE 5
+# PAGE 5 — Final Certificate with PDF Download
 # =============================================================================
 elif st.session_state.page == 5:
     render_steps(5)
@@ -1873,36 +2245,55 @@ elif st.session_state.page == 5:
         "Needs Review": "#c0392b",
     }.get(quality, "#888")
 
+    # ── PDF download (generate once per session state hash) ──────────────────
+    pdf_cache_key = "pdf_bytes_cached"
+    if pdf_cache_key not in st.session_state or st.session_state.get("pdf_cert_no") != cert_no:
+        try:
+            pdf_bytes = generate_certificate_pdf(
+                fd=fd,
+                coded_causes=coded_causes,
+                validation=validation,
+                hospital_name=hospital_name,
+                hospital_city=hospital_city,
+                doctor_name=doctor_name,
+            )
+            st.session_state[pdf_cache_key] = pdf_bytes
+            st.session_state["pdf_cert_no"] = cert_no
+        except Exception as e:
+            st.session_state[pdf_cache_key] = None
+            st.error(f"PDF generation failed: {e}")
+
+    pdf_bytes = st.session_state.get(pdf_cache_key)
+
+    # ── Top action bar ────────────────────────────────────────────────────────
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Final Death Certificate</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        f"""
-        <div class="cert-preview">
-            <div style="display:flex;justify-content:space-between;align-items:center;
-                        border-bottom:2px solid var(--green);padding-bottom:1rem;margin-bottom:1.4rem;gap:12px;flex-wrap:wrap">
-                <div>
-                    <div style="font-size:.95rem;font-weight:700;color:var(--green)">Kingdom of Saudi Arabia</div>
-                    <div style="font-size:.8rem;color:var(--muted)">Ministry of Health</div>
-                    <div style="font-size:.75rem;color:#888">{escape(hospital_name)} — {escape(hospital_city)}</div>
-                </div>
-                <div style="text-align:center">
-                    <div class="cert-title">Final Death Certificate</div>
-                    <div class="cert-sub">Complete physician review page</div>
-                    <div style="background:var(--green);color:white;border-radius:4px;padding:2px 10px;
-                                font-size:.76rem;margin-top:5px;display:inline-block">
-                        No: {escape(cert_no)}
-                    </div>
-                </div>
-                <div style="text-align:right">
-                    <div style="font-size:.95rem;font-weight:700;color:var(--green)">Saudi MOH</div>
-                    <div style="font-size:.8rem;color:var(--muted)">Final Review</div>
-                </div>
-            </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        st.markdown(
+            f'<div style="background:white;border:2px solid {quality_color};border-radius:8px;'
+            f'padding:.7rem 1rem;display:inline-block">'
+            f'<b style="color:{quality_color}">Validation: {escape(quality)}</b> &nbsp;|&nbsp; '
+            f'Underlying cause: <b style="font-family:monospace">{escape(underlying_code)}</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with top_right:
+        if pdf_bytes:
+            st.download_button(
+                label="⬇ Download PDF",
+                data=pdf_bytes,
+                file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning("PDF unavailable")
 
+    st.markdown("---")
+
+    # ── Patient Information ───────────────────────────────────────────────────
     st.markdown("### Patient Information")
     p1, p2 = st.columns(2)
     with p1:
@@ -1927,17 +2318,17 @@ elif st.session_state.page == 5:
         st.write(f"**Recent Surgery:** {fd.get('had_surgery', '—')}")
 
     st.markdown("---")
-    st.markdown("### Part I — Direct Causal Chain")
 
+    # ── Part I ────────────────────────────────────────────────────────────────
+    st.markdown("### Part I — Direct Causal Chain")
     row_names = ["(a)", "(b)", "(c)", "(d)", "(e)"]
     part1_html = ""
-
     for i, item in enumerate(part1):
         row_label = row_names[i] if i < len(row_names) else f"({i+1})"
-        code_display = item.get("code_formatted") or "Pending manual review"
+        code_display  = item.get("code_formatted") or "Pending manual review"
         short_display = item.get("short_desc") or "Pending manual review"
-        long_display = item.get("long_desc") or "Pending manual review"
-        status_display = item.get("selection_status", "—")
+        long_display  = item.get("long_desc") or "Pending manual review"
+        status_display= item.get("selection_status", "—")
 
         part1_html += f"""
         <div class="final-block">
@@ -1962,14 +2353,14 @@ elif st.session_state.page == 5:
     else:
         st.info("No Part I causes available.")
 
+    # ── Part II ───────────────────────────────────────────────────────────────
     st.markdown("### Part II — Other Significant Conditions")
-
     part2_html = ""
     for i, item in enumerate(part2, start=1):
-        code_display = item.get("code_formatted") or "Pending manual review"
+        code_display  = item.get("code_formatted") or "Pending manual review"
         short_display = item.get("short_desc") or "Pending manual review"
-        long_display = item.get("long_desc") or "Pending manual review"
-        status_display = item.get("selection_status", "—")
+        long_display  = item.get("long_desc") or "Pending manual review"
+        status_display= item.get("selection_status", "—")
 
         part2_html += f"""
         <div class="final-block-secondary">
@@ -1995,20 +2386,26 @@ elif st.session_state.page == 5:
         st.info("No Part II conditions available.")
 
     st.markdown("---")
-    st.markdown("### Validation Summary")
 
+    # ── Underlying cause highlight ────────────────────────────────────────────
     st.markdown(
-        f"""
-        <div style="background:white;border:2px solid {quality_color};border-radius:8px;
-                    padding:1rem 1.2rem;margin-bottom:1rem">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-                <b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>
-                <span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">
-                    Underlying cause: {escape(underlying_code)}
-                </span>
-            </div>
-        </div>
-        """,
+        f'<div style="background:#f0f4ff;border:2px solid #1a4a7a;border-radius:8px;'
+        f'padding:1rem 1.4rem;margin-bottom:1rem">'
+        f'<b style="color:#1a4a7a;font-size:.95rem">Underlying Cause (for mortality statistics):</b> '
+        f'<span style="font-family:monospace;font-weight:800;font-size:1.1rem;color:#1a4a7a">{escape(underlying_code)}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Validation Summary ────────────────────────────────────────────────────
+    st.markdown("### Validation Summary")
+    st.markdown(
+        f'<div style="background:white;border:2px solid {quality_color};border-radius:8px;'
+        f'padding:1rem 1.2rem;margin-bottom:1rem">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">'
+        f'<b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>'
+        f'<span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">'
+        f'Underlying cause: {escape(underlying_code)}</span></div></div>',
         unsafe_allow_html=True,
     )
 
@@ -2022,6 +2419,8 @@ elif st.session_state.page == 5:
         st.info(who_notes)
 
     st.markdown("---")
+
+    # ── Physician block ───────────────────────────────────────────────────────
     st.markdown("### Physician / Hospital Information")
     d1, d2 = st.columns(2)
     with d1:
@@ -2033,6 +2432,8 @@ elif st.session_state.page == 5:
         st.write("**Official Stamp:** MOH Draft / Final Review")
 
     st.markdown("---")
+
+    # ── Original narrative ────────────────────────────────────────────────────
     st.markdown("### Original Narrative")
     st.text_area(
         "Cause Narrative Used for Extraction",
@@ -2043,6 +2444,22 @@ elif st.session_state.page == 5:
 
     with st.expander("Show extracted structure (debug)"):
         st.json(concepts)
+
+    # ── Download buttons ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Download")
+
+    dl1, dl2 = st.columns(2)
+
+    if pdf_bytes:
+        with dl1:
+            st.download_button(
+                label="⬇ Download Final Certificate as PDF",
+                data=pdf_bytes,
+                file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
     final_lines = [
         "FINAL DEATH CERTIFICATE",
@@ -2117,17 +2534,18 @@ elif st.session_state.page == 5:
         f"Physician: {doctor_name}",
     ]
 
-    st.download_button(
-        "Download Final Certificate Summary",
-        data="\n".join(final_lines).encode("utf-8"),
-        file_name=f"{sanitize_filename('final_death_certificate_' + cert_no)}.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
+    with dl2:
+        st.download_button(
+            label="⬇ Download Summary as Text (.txt)",
+            data="\n".join(final_lines).encode("utf-8"),
+            file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # ── Navigation ────────────────────────────────────────────────────────────
     st.markdown("---")
     b1, b2, b3, _ = st.columns([1, 1, 1.2, 5])
 
@@ -2149,4 +2567,8 @@ elif st.session_state.page == 5:
             st.session_state.page = 1
             st.session_state.form_data = {}
             st.session_state.icd_results = None
+            # clear pdf cache too
+            for k in ["pdf_bytes_cached", "pdf_cert_no"]:
+                if k in st.session_state:
+                    del st.session_state[k]
             st.rerun()
