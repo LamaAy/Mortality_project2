@@ -969,6 +969,160 @@ def has_multiple_causes_in_one_line(cause_text: str) -> bool:
         return True
     return False
 
+
+def clean_cause_input(cause_text: str) -> str:
+    """Clean doctor-entered cause text before validation/retrieval."""
+    c = str(cause_text or "").strip()
+    c = re.sub(r"^\(?[a-dA-D]\)?[\.:\-\s]+", "", c).strip()
+    c = re.sub(r"^(part\s*i+\s*)?\(?[a-dA-D]\)?[\.:\-\s]+", "", c, flags=re.I).strip()
+    c = re.sub(r"^(ii[-\s]*\d+|part\s*ii[-\s]*\d*)[\.:\-\s]+", "", c, flags=re.I).strip()
+    c = re.sub(r"\s+", " ", c)
+    return c
+
+def looks_like_non_medical_sentence(cause_text: str) -> bool:
+    """Detect narrative text that should not be placed in one COD line."""
+    c = normalize_text_basic(cause_text)
+    if not c:
+        return False
+    bad_phrases = [
+        "patient died", "passed away", "became sick", "very sick", "peacefully",
+        "found dead", "was admitted", "was brought", "condition deteriorated",
+        "after being", "complained of", "because of unknown", "unknown reason",
+    ]
+    if any(p in c for p in bad_phrases):
+        return True
+    # Long sentence-like entries are suspicious for a structured cause line.
+    token_count = len(tokenize(c))
+    if token_count >= 10 and any(w in c for w in [" patient ", " died ", " admitted ", " hospital ", " after "]):
+        return True
+    return False
+
+def pre_validate_structured_cod(part1_chain: List[Dict], part2_conditions: List[Dict]) -> Dict:
+    """Pre-coding validation. Blocks retrieval only for form-structure errors."""
+    issues = []
+    cleaned_part1, cleaned_part2 = [], []
+
+    # Clean and preserve line order.
+    for x in part1_chain:
+        cx = dict(x)
+        cx["cause"] = clean_cause_input(cx.get("cause", ""))
+        if cx["cause"]:
+            cleaned_part1.append(cx)
+
+    for x in part2_conditions:
+        cx = dict(x)
+        cx["cause"] = clean_cause_input(cx.get("cause", ""))
+        if cx["cause"]:
+            cleaned_part2.append(cx)
+
+    if not cleaned_part1:
+        issues.append({
+            "severity": "error",
+            "line": "Part I",
+            "type": "empty_part_i",
+            "message": "Part I cannot be empty. Enter at least the immediate cause of death.",
+            "blocking": True,
+        })
+
+    # No skipped lines in Part I: if c/d filled while earlier line empty, block.
+    filled_letters = {str(x.get("line", "")).lower() for x in cleaned_part1}
+    order = ["a", "b", "c", "d"]
+    for i, letter in enumerate(order):
+        later_filled = any(l in filled_letters for l in order[i + 1:])
+        if letter not in filled_letters and later_filled:
+            issues.append({
+                "severity": "error",
+                "line": f"Part I ({letter})",
+                "type": "skipped_line",
+                "message": "Do not skip Part I lines. Fill the causal sequence consecutively from (a) downward.",
+                "blocking": True,
+            })
+
+    all_lines = [(f"Part I ({x.get('line','')})", x) for x in cleaned_part1] + [(str(x.get("line", "Part II")), x) for x in cleaned_part2]
+    for label, x in all_lines:
+        cause = x.get("cause", "")
+        if has_multiple_causes_in_one_line(cause):
+            issues.append({
+                "severity": "error",
+                "line": label,
+                "type": "multiple_causes",
+                "message": "Only one disease or condition is allowed per line. Split combined causes into separate lines.",
+                "blocking": True,
+            })
+        if looks_like_non_medical_sentence(cause):
+            issues.append({
+                "severity": "error",
+                "line": label,
+                "type": "narrative_text",
+                "message": "Use a concise medical condition, not a narrative sentence.",
+                "blocking": True,
+            })
+
+    tentative = cleaned_part1[-1] if cleaned_part1 else {}
+    return {
+        "part1_chain": cleaned_part1,
+        "part2_conditions": cleaned_part2,
+        "issues": issues,
+        "blocking": any(i.get("blocking") for i in issues),
+        "tentative_underlying": tentative,
+    }
+
+def doctor_issue_card(issue: Dict) -> None:
+    sev = issue.get("severity", "warning")
+    msg = f"{issue.get('line','')}: {issue.get('message','')}"
+    if sev == "error":
+        st.error(msg)
+    else:
+        st.warning(msg)
+
+def compact_candidate_label(c: Dict) -> str:
+    code = c.get("code_formatted", "")
+    desc = c.get("short_desc", "") or c.get("long_desc", "")
+    return f"{code} — {desc}" if code else desc
+
+def strict_quality_from_results(coded_causes: List[Dict], validation: Dict, pre_issues: Optional[List[Dict]] = None) -> str:
+    """Final quality: missing codes / blocking validation / sequence flags force Needs Review."""
+    issues = list(validation.get("coding_issues", []) or [])
+    if pre_issues and any(i.get("severity") == "error" for i in pre_issues):
+        return "Needs Review"
+    if not coded_causes:
+        return "Needs Review"
+    if any(not x.get("code_formatted") for x in coded_causes):
+        return "Needs Review"
+    if any(str(x.get("selection_status", "")) == "manual_review" for x in coded_causes):
+        return "Needs Review"
+    if issues:
+        return "Needs Review" if len(issues) > 0 else "Good"
+    return "Excellent"
+
+def causal_sequence_check_with_claude(api_key: str, part1_items: List[Dict]) -> Dict:
+    """AI-assisted sequence plausibility check; does not invent ICD codes."""
+    filled = [
+        {"line": x.get("line", ""), "cause": x.get("cause", ""), "code": x.get("code_formatted", "")}
+        for x in part1_items if str(x.get("cause", "")).strip()
+    ]
+    if len(filled) <= 1:
+        return {"valid": True, "warnings": [], "summary": "Single Part I cause; no causal chain to compare."}
+    system_prompt = """
+You are a death-certificate sequence reviewer.
+Assess only whether each lower Part I condition can medically give rise to the condition immediately above it.
+Do not add new diseases. Do not invent ICD codes. Return only valid JSON.
+Schema:
+{"valid": true, "warnings": ["string"], "summary": "string"}
+"""
+    user_prompt = "Part I chain, immediate to underlying:\n" + json.dumps(filled, ensure_ascii=False, indent=2)
+    try:
+        out = call_claude_json(api_key, system_prompt, user_prompt, max_tokens=500, fallback={"valid": True, "warnings": [], "summary": "Sequence check unavailable."})
+        if not isinstance(out, dict):
+            return {"valid": True, "warnings": [], "summary": "Sequence check returned an unexpected format."}
+        return {
+            "valid": bool(out.get("valid", True)),
+            "warnings": list(out.get("warnings", []) or []),
+            "summary": str(out.get("summary", "") or ""),
+        }
+    except Exception as e:
+        return {"valid": True, "warnings": [], "summary": f"Sequence check failed: {type(e).__name__}: {e}"}
+
 def validate_cause_line_from_excel(
     cause_text: str,
     line_label: str,
@@ -2143,174 +2297,212 @@ elif st.session_state.page == 3:
     bm25 = st.session_state.bm25_index
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">WHO Cause of Death Form</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Cause of Death — WHO Structured Form</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div style="background:#fffbe6;border-left:3px solid #C8A951;padding:9px 14px;'
-        'border-radius:5px;margin-bottom:1.1rem;font-size:.87rem;color:#5a4a00">'
-        'Enter <b>one disease or condition per line</b>. Line (a) is the immediate cause. '
-        'The lowest completed line in Part I is the candidate underlying cause and should explain the lines above it.'
+        '<div style="background:#fffdf2;border-left:3px solid #C8A951;padding:9px 14px;'
+        'border-radius:6px;margin-bottom:1rem;font-size:.86rem;color:#4c4315">'
+        'Enter <b>one medical condition per line</b>. The form validates structure before ICD retrieval. '
+        'The lowest completed Part I line is the tentative starting point / UCOD candidate.'
         '</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-
-    st.markdown("#### Part I — Direct sequence of events leading to death")
-    st.caption("The condition on each lower line should medically cause, or give rise to, the condition above it.")
-
-    part1_defs = [
-        ("a", "Immediate cause of death", "immediate", "e.g., acute respiratory distress syndrome"),
-        ("b", "Due to / as a consequence of", "contributing", "e.g., septic shock"),
-        ("c", "Due to / as a consequence of", "contributing", "e.g., generalized peritonitis"),
-        ("d", "Underlying cause of death", "underlying", "e.g., perforated sigmoid diverticulitis"),
-    ]
-
-    part1_chain = []
-    live_issues = []
-    live_candidates = {}
-
-    for letter, label, role, placeholder in part1_defs:
-        c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
-        with c0:
-            st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#006940'>({letter})</div>", unsafe_allow_html=True)
-        with c1:
-            cause = st.text_input(
-                label,
-                value=fd.get(f"part1_{letter}_cause", ""),
-                key=f"part1_{letter}_cause",
-                placeholder=placeholder,
-            )
-        with c2:
-            interval = st.text_input(
-                "Approximate interval",
-                value=fd.get(f"part1_{letter}_interval", ""),
-                key=f"part1_{letter}_interval",
-                placeholder="e.g., 2 days",
-            )
-
-        if cause.strip():
-            part1_chain.append({
-                "line": letter,
-                "cause": cause.strip(),
-                "interval": interval.strip() or "—",
-            })
-            if df_source is not None:
-                issues, cands = validate_cause_line_from_excel(
-                    cause_text=cause,
-                    line_label=f"Part I ({letter})",
-                    role=role,
-                    df_source=df_source,
-                    faiss_index=faiss_index,
-                    bm25=bm25,
-                    sex_value=fd.get("sex", ""),
-                    age_years=fd.get("age_years", 0),
-                    top_k=5,
-                )
-                live_issues.extend(issues)
-                live_candidates[f"Part I ({letter})"] = cands
-
-    st.markdown("---")
-    st.markdown("#### Part II — Other significant conditions")
-    st.caption("Conditions that contributed to death but are not part of the direct sequence in Part I.")
-
-    part2_conditions = []
-    for i in range(1, 4):
-        c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
-        with c0:
-            st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#1a4a7a'>II-{i}</div>", unsafe_allow_html=True)
-        with c1:
-            cause = st.text_input(
-                f"Other significant condition {i}",
-                value=fd.get(f"part2_{i}_cause", ""),
-                key=f"part2_{i}_cause",
-                placeholder="e.g., type 2 diabetes mellitus",
-            )
-        with c2:
-            interval = st.text_input(
-                "Approximate interval",
-                value=fd.get(f"part2_{i}_interval", ""),
-                key=f"part2_{i}_interval",
-                placeholder="e.g., 12 years",
-            )
-
-        if cause.strip():
-            part2_conditions.append({
-                "line": f"II-{i}",
-                "cause": cause.strip(),
-                "interval": interval.strip() or "—",
-            })
-            if df_source is not None:
-                issues, cands = validate_cause_line_from_excel(
-                    cause_text=cause,
-                    line_label=f"Part II ({i})",
-                    role="other",
-                    df_source=df_source,
-                    faiss_index=faiss_index,
-                    bm25=bm25,
-                    sex_value=fd.get("sex", ""),
-                    age_years=fd.get("age_years", 0),
-                    top_k=5,
-                )
-                live_issues.extend(issues)
-                live_candidates[f"Part II ({i})"] = cands
-
-    if live_issues:
-        st.markdown("---")
-        st.markdown("#### Live feedback from Excel source")
-        for issue in live_issues:
-            msg = f"{issue['line']}: {issue['message']}"
-            if issue.get("severity") == "error":
-                st.error(msg)
-            else:
-                st.warning(msg)
-
-    with st.expander("Show best retrieved Excel candidates", expanded=False):
-        if not live_candidates:
-            st.caption("Enter a cause to retrieve ICD candidates from the Excel source.")
-        for line, cands in live_candidates.items():
-            st.markdown(f"**{line}**")
-            if not cands:
-                st.caption("No candidates retrieved.")
-                continue
-            for c in cands[:3]:
-                st.caption(
-                    f"{c.get('code_formatted','')} — {c.get('short_desc','')} | "
-                    f"Main: {c.get('acceptable_main','')} | Class: {c.get('classification','')} | "
-                    f"Note: {c.get('note','')}"
-                )
-
     st.markdown('</div>', unsafe_allow_html=True)
 
-    b1, b2, _ = st.columns([1, 1.6, 6])
+    part1_defs = [
+        ("a", "Immediate cause", "immediate", "e.g., acute respiratory distress syndrome"),
+        ("b", "Due to / as a consequence of", "contributing", "e.g., septic shock"),
+        ("c", "Due to / as a consequence of", "contributing", "e.g., generalized peritonitis"),
+        ("d", "Underlying cause", "underlying", "e.g., perforated sigmoid diverticulitis"),
+    ]
+
+    left, right = st.columns([1.55, 1.0], gap="large")
+    part1_chain = []
+    part2_conditions = []
+    live_excel_issues = []
+    live_candidates = {}
+
+    with left:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Part I — Direct causal sequence</div>', unsafe_allow_html=True)
+        st.caption("Each lower line should explain or give rise to the line above it.")
+
+        for letter, label, role, placeholder in part1_defs:
+            c0, c1, c2 = st.columns([0.09, 0.66, 0.25])
+            with c0:
+                st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#006940'>({letter})</div>", unsafe_allow_html=True)
+            with c1:
+                raw_cause = st.text_input(
+                    label,
+                    value=fd.get(f"part1_{letter}_cause", ""),
+                    key=f"part1_{letter}_cause",
+                    placeholder=placeholder,
+                )
+            with c2:
+                interval = st.text_input(
+                    "Interval",
+                    value=fd.get(f"part1_{letter}_interval", ""),
+                    key=f"part1_{letter}_interval",
+                    placeholder="e.g., 2 days",
+                )
+
+            cause = clean_cause_input(raw_cause)
+            if raw_cause and cause != raw_cause.strip():
+                st.caption(f"Cleaned to: {cause}")
+            if cause:
+                item = {"line": letter, "cause": cause, "interval": interval.strip() or "—"}
+                part1_chain.append(item)
+                if df_source is not None:
+                    issues, cands = validate_cause_line_from_excel(
+                        cause_text=cause,
+                        line_label=f"Part I ({letter})",
+                        role=role,
+                        df_source=df_source,
+                        faiss_index=faiss_index,
+                        bm25=bm25,
+                        sex_value=fd.get("sex", ""),
+                        age_years=fd.get("age_years", 0),
+                        top_k=5,
+                    )
+                    live_excel_issues.extend(issues)
+                    live_candidates[f"Part I ({letter})"] = cands
+
+        st.markdown("---")
+        st.markdown('<div class="section-title">Part II — Other significant conditions</div>', unsafe_allow_html=True)
+        st.caption("Conditions contributing to death but not part of the direct causal chain.")
+
+        for i in range(1, 4):
+            c0, c1, c2 = st.columns([0.09, 0.66, 0.25])
+            with c0:
+                st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#1a4a7a'>II-{i}</div>", unsafe_allow_html=True)
+            with c1:
+                raw_cause = st.text_input(
+                    f"Other significant condition {i}",
+                    value=fd.get(f"part2_{i}_cause", ""),
+                    key=f"part2_{i}_cause",
+                    placeholder="e.g., type 2 diabetes mellitus",
+                )
+            with c2:
+                interval = st.text_input(
+                    "Interval",
+                    value=fd.get(f"part2_{i}_interval", ""),
+                    key=f"part2_{i}_interval",
+                    placeholder="e.g., 12 years",
+                )
+
+            cause = clean_cause_input(raw_cause)
+            if cause:
+                item = {"line": f"II-{i}", "cause": cause, "interval": interval.strip() or "—"}
+                part2_conditions.append(item)
+                if df_source is not None:
+                    issues, cands = validate_cause_line_from_excel(
+                        cause_text=cause,
+                        line_label=f"Part II ({i})",
+                        role="other",
+                        df_source=df_source,
+                        faiss_index=faiss_index,
+                        bm25=bm25,
+                        sex_value=fd.get("sex", ""),
+                        age_years=fd.get("age_years", 0),
+                        top_k=5,
+                    )
+                    live_excel_issues.extend(issues)
+                    live_candidates[f"Part II ({i})"] = cands
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    precheck = pre_validate_structured_cod(part1_chain, part2_conditions)
+    blocking_issues = [x for x in precheck["issues"] if x.get("severity") == "error"]
+    warnings = [x for x in precheck["issues"] if x.get("severity") != "error"] + live_excel_issues
+    tentative = precheck.get("tentative_underlying", {})
+
+    with right:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Live Medical Coding Assistant</div>', unsafe_allow_html=True)
+
+        if precheck["blocking"]:
+            st.error("Fix blocking form issues before ICD coding.")
+        else:
+            st.success("Form structure is ready for ICD retrieval.")
+
+        if tentative:
+            st.markdown(
+                f"<div style='background:#f0f4ff;border:1px solid #c8d7ff;border-radius:6px;padding:.7rem;margin:.6rem 0'>"
+                f"<b style='color:#1a4a7a'>Tentative UCOD candidate:</b><br>"
+                f"<span style='font-size:.92rem'>{escape(tentative.get('cause','—'))}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Enter Part I causes to see the tentative UCOD candidate.")
+
+        if blocking_issues:
+            st.markdown("**Blocking issues**")
+            for issue in blocking_issues:
+                doctor_issue_card(issue)
+
+        if warnings:
+            st.markdown("**Warnings / suggestions**")
+            for issue in warnings[:8]:
+                doctor_issue_card(issue)
+            if len(warnings) > 8:
+                st.caption(f"+ {len(warnings) - 8} more warnings hidden.")
+        elif not blocking_issues and part1_chain:
+            st.success("No live warnings detected.")
+
+        st.markdown("---")
+        st.markdown("**ICD retrieval status**")
+        if df_source is None:
+            st.error("ICD Excel source is not loaded.")
+        elif not part1_chain:
+            st.caption("Waiting for Part I input.")
+        elif precheck["blocking"]:
+            st.warning("Retrieval paused until blocking issues are fixed.")
+        else:
+            st.success("Ready: Excel candidates will be retrieved on the Review page.")
+
+        with st.expander("Advanced: best retrieved Excel candidates", expanded=False):
+            if not live_candidates:
+                st.caption("No candidates yet.")
+            for line, cands in live_candidates.items():
+                st.markdown(f"**{line}**")
+                if not cands:
+                    st.caption("No candidates retrieved.")
+                for c in cands[:3]:
+                    st.caption(compact_candidate_label(c) + f" | Main: {c.get('acceptable_main','')}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    b1, b2, _ = st.columns([1, 1.8, 5.5])
     with b1:
         if st.button("Back", use_container_width=True):
             st.session_state.page = 2
             st.rerun()
     with b2:
-        if st.button("Analyze & Find Codes", use_container_width=True, type="primary"):
-            if not part1_chain:
+        if st.button("Analyze & Find Codes", use_container_width=True, type="primary", disabled=precheck["blocking"]):
+            if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
                 st.error("ICD source data failed to load. Check the sidebar error messages.")
             elif not API_KEY:
                 st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
             else:
-                # Persist structured fields. No free-text extraction is needed.
-                for x in part1_chain:
+                for x in precheck["part1_chain"]:
                     fd[f"part1_{x['line']}_cause"] = x["cause"]
                     fd[f"part1_{x['line']}_interval"] = x["interval"]
-                for x in part2_conditions:
+                for x in precheck["part2_conditions"]:
                     idx = str(x["line"]).replace("II-", "")
                     fd[f"part2_{idx}_cause"] = x["cause"]
                     fd[f"part2_{idx}_interval"] = x["interval"]
 
                 narrative_parts = []
-                if part1_chain:
-                    narrative_parts.append(" due to ".join([f"{x['cause']} ({x['interval']})" for x in part1_chain]))
-                if part2_conditions:
-                    narrative_parts.append("Other significant conditions included " + ", ".join([f"{x['cause']} ({x['interval']})" for x in part2_conditions]))
+                if precheck["part1_chain"]:
+                    narrative_parts.append(" due to ".join([f"{x['cause']} ({x['interval']})" for x in precheck["part1_chain"]]))
+                if precheck["part2_conditions"]:
+                    narrative_parts.append("Other significant conditions included " + ", ".join([f"{x['cause']} ({x['interval']})" for x in precheck["part2_conditions"]]))
 
                 st.session_state.form_data.update(fd)
-                st.session_state.form_data["manual_part1_chain"] = part1_chain
-                st.session_state.form_data["manual_part2_conditions"] = part2_conditions
+                st.session_state.form_data["manual_part1_chain"] = precheck["part1_chain"]
+                st.session_state.form_data["manual_part2_conditions"] = precheck["part2_conditions"]
+                st.session_state.form_data["precheck_issues"] = precheck["issues"]
                 st.session_state.form_data["free_text"] = ". ".join(narrative_parts) + "."
                 st.session_state.icd_results = None
                 st.session_state.page = 4
