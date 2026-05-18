@@ -2411,64 +2411,53 @@ elif st.session_state.page == 3:
         st.markdown('</div>', unsafe_allow_html=True)
 
     precheck = pre_validate_structured_cod(part1_chain, part2_conditions)
+    has_any_cod_input = bool(part1_chain or part2_conditions)
     blocking_issues = [x for x in precheck["issues"] if x.get("severity") == "error"]
     warnings = [x for x in precheck["issues"] if x.get("severity") != "error"] + live_excel_issues
     tentative = precheck.get("tentative_underlying", {})
 
     with right:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Live Medical Coding Assistant</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Medical Coding Assistant</div>', unsafe_allow_html=True)
 
-        if precheck["blocking"]:
-            st.error("Fix blocking form issues before ICD coding.")
+        # Empty state: do not show errors before the doctor starts entering causes.
+        if not has_any_cod_input:
+            st.caption("The underlying cause and ICD suggestions will appear after Part I is completed.")
         else:
-            st.success("Form structure is ready for ICD retrieval.")
+            if precheck["blocking"]:
+                st.warning("Please review the cause-of-death form before coding.")
+            else:
+                st.success("Ready for ICD coding.")
 
-        if tentative:
-            st.markdown(
-                f"<div style='background:#f0f4ff;border:1px solid #c8d7ff;border-radius:6px;padding:.7rem;margin:.6rem 0'>"
-                f"<b style='color:#1a4a7a'>Tentative UCOD candidate:</b><br>"
-                f"<span style='font-size:.92rem'>{escape(tentative.get('cause','—'))}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("Enter Part I causes to see the tentative UCOD candidate.")
+            if tentative:
+                st.markdown(
+                    f"<div style='background:#f8faf8;border:1px solid #edf2ed;border-radius:6px;padding:.65rem;margin:.6rem 0'>"
+                    f"<b style='color:#006940'>Tentative underlying cause:</b><br>"
+                    f"<span style='font-size:.92rem'>{escape(tentative.get('cause','—'))}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-        if blocking_issues:
-            st.markdown("**Blocking issues**")
-            for issue in blocking_issues:
-                doctor_issue_card(issue)
+            if blocking_issues:
+                st.markdown("**Please review**")
+                for issue in blocking_issues:
+                    doctor_issue_card(issue)
 
-        if warnings:
-            st.markdown("**Warnings / suggestions**")
-            for issue in warnings[:8]:
-                doctor_issue_card(issue)
-            if len(warnings) > 8:
-                st.caption(f"+ {len(warnings) - 8} more warnings hidden.")
-        elif not blocking_issues and part1_chain:
-            st.success("No live warnings detected.")
+            if warnings:
+                st.markdown("**Suggestions**")
+                for issue in warnings[:6]:
+                    doctor_issue_card(issue)
+                if len(warnings) > 6:
+                    st.caption(f"+ {len(warnings) - 6} more suggestions hidden.")
+            elif not blocking_issues and part1_chain:
+                st.caption("No live warnings detected.")
 
-        st.markdown("---")
-        st.markdown("**ICD retrieval status**")
-        if df_source is None:
-            st.error("ICD Excel source is not loaded.")
-        elif not part1_chain:
-            st.caption("Waiting for Part I input.")
-        elif precheck["blocking"]:
-            st.warning("Retrieval paused until blocking issues are fixed.")
-        else:
-            st.success("Ready: Excel candidates will be retrieved on the Review page.")
+            # Keep retrieval details hidden from doctors. Full candidates remain available in Review & Coding if needed.
+            if df_source is None:
+                st.error("ICD source data is not loaded.")
+            elif not precheck["blocking"]:
+                st.caption("ICD suggestions will be generated on the Review & Coding page.")
 
-        with st.expander("Advanced: best retrieved Excel candidates", expanded=False):
-            if not live_candidates:
-                st.caption("No candidates yet.")
-            for line, cands in live_candidates.items():
-                st.markdown(f"**{line}**")
-                if not cands:
-                    st.caption("No candidates retrieved.")
-                for c in cands[:3]:
-                    st.caption(compact_candidate_label(c) + f" | Main: {c.get('acceptable_main','')}")
         st.markdown('</div>', unsafe_allow_html=True)
 
     b1, b2, _ = st.columns([1, 1.8, 5.5])
@@ -2477,7 +2466,7 @@ elif st.session_state.page == 3:
             st.session_state.page = 2
             st.rerun()
     with b2:
-        if st.button("Analyze & Find Codes", use_container_width=True, type="primary", disabled=precheck["blocking"]):
+        if st.button("Analyze & Find Codes", use_container_width=True, type="primary", disabled=(not has_any_cod_input or precheck["blocking"])):
             if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
