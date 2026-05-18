@@ -1235,7 +1235,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "no_excel_match",
-            "message": "No ICD candidate was retrieved from the Excel source. Please use a more specific medical term.",
+            "message": "No ICD candidate was retrieved from the coding source. Please use a more specific medical term.",
         })
         return issues, candidates
 
@@ -1314,9 +1314,9 @@ def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
         cause = normalize_text_basic(x.get("cause", ""))
 
         if is_excel_ill_defined(x):
-            issues.append(f"{code} is flagged by the Excel source as ill-defined/vague and should be replaced by a more specific disease or injury if available.")
+            issues.append(f"{code} is flagged by the coding source as ill-defined/vague and should be replaced by a more specific disease or injury if available.")
         if is_excel_unlikely_to_cause_death(x):
-            issues.append(f"{code} is flagged by the Excel source as unlikely to cause death.")
+            issues.append(f"{code} is flagged by the coding source as unlikely to cause death.")
 
         if code[:1] in {"V", "W", "X", "Y"} and not query_indicates_external_cause(cause):
             issues.append(f"{code} is an external-cause/procedure code that does not fit a natural disease phrase.")
@@ -2385,7 +2385,6 @@ elif st.session_state.page == 3:
     live_candidates = {}
 
     with left:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Part I — Direct causal sequence</div>', unsafe_allow_html=True)
         st.caption("Each lower line should explain or give rise to the line above it.")
 
@@ -2471,7 +2470,6 @@ elif st.session_state.page == 3:
                     live_excel_issues.extend(issues)
                     live_candidates[f"Part II ({i})"] = cands
 
-        st.markdown('</div>', unsafe_allow_html=True)
 
     precheck = pre_validate_structured_cod(part1_chain, part2_conditions)
     has_any_cod_input = bool(part1_chain or part2_conditions)
@@ -2480,7 +2478,6 @@ elif st.session_state.page == 3:
     tentative = precheck.get("tentative_underlying", {})
 
     with right:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Medical Coding Assistant</div>', unsafe_allow_html=True)
 
         # Empty state: do not show errors before the doctor starts entering causes.
@@ -2521,7 +2518,6 @@ elif st.session_state.page == 3:
             elif not precheck["blocking"]:
                 st.caption("ICD suggestions will be generated on the Review & Coding page.")
 
-        st.markdown('</div>', unsafe_allow_html=True)
 
     b1, b2, _ = st.columns([1, 1.8, 5.5])
     with b1:
@@ -2533,7 +2529,7 @@ elif st.session_state.page == 3:
             if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
-                st.error("ICD source data failed to load. Check the sidebar error messages.")
+                st.error("ICD source data failed to load. Please check the data source configuration.")
             elif not API_KEY:
                 st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
             else:
