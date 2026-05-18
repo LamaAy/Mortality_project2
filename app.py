@@ -1057,6 +1057,36 @@ def pre_validate_structured_cod(part1_chain: List[Dict], part2_conditions: List[
                 "message": "Use a concise medical condition, not a narrative sentence.",
                 "blocking": True,
             })
+        issues.extend(validate_interval_text(x.get("interval", ""), label))
+
+    # Duplicate disease check: repeated causes in Part I usually mean the causal sequence was not entered correctly.
+    seen = {}
+    for x in cleaned_part1:
+        key = normalize_cause_key(x.get("cause", ""))
+        if not key:
+            continue
+        current_line = str(x.get("line", "")).lower()
+        if key in seen:
+            issues.append({
+                "severity": "error",
+                "line": f"Part I ({current_line})",
+                "type": "duplicate_cause",
+                "message": f"This repeats Part I ({seen[key]}). Each line should contain the next cause in the causal chain, not the same condition again.",
+                "blocking": True,
+            })
+        else:
+            seen[key] = current_line
+
+    # Adjacent same-cause sequence check.
+    for prev, curr in zip(cleaned_part1, cleaned_part1[1:]):
+        if normalize_cause_key(prev.get("cause", "")) == normalize_cause_key(curr.get("cause", "")):
+            issues.append({
+                "severity": "error",
+                "line": f"Part I ({curr.get('line','')})",
+                "type": "invalid_sequence_duplicate",
+                "message": "The lower line should explain the line above; it cannot be the exact same condition.",
+                "blocking": True,
+            })
 
     tentative = cleaned_part1[-1] if cleaned_part1 else {}
     return {
@@ -1123,6 +1153,48 @@ Schema:
     except Exception as e:
         return {"valid": True, "warnings": [], "summary": f"Sequence check failed: {type(e).__name__}: {e}"}
 
+
+
+def normalize_cause_key(cause_text: str) -> str:
+    """Normalize cause text for duplicate detection."""
+    c = normalize_text_basic(clean_cause_input(cause_text))
+    c = re.sub(r"[^a-z0-9\u0600-\u06FF]+", " ", c)
+    c = re.sub(r"\s+", " ", c).strip()
+    return c
+
+def validate_interval_text(interval_text: str, line_label: str) -> List[Dict]:
+    """Doctor-facing validation for approximate interval fields."""
+    t = str(interval_text or "").strip().lower()
+    if not t:
+        return [{
+            "severity": "warning",
+            "line": line_label,
+            "type": "missing_interval",
+            "message": "Add an approximate interval, such as 2 days, 3 hours, 6 months, or unknown.",
+            "blocking": False,
+        }]
+    if t in {"unknown", "unk", "not known", "n/a", "na", "-", "—"}:
+        return []
+    # A number alone, e.g. 2 or 7, is ambiguous.
+    if re.fullmatch(r"\d+(?:\.\d+)?", t):
+        return [{
+            "severity": "warning",
+            "line": line_label,
+            "type": "ambiguous_interval",
+            "message": "Interval needs a time unit, e.g., 2 days, 4 hours, or 7 years.",
+            "blocking": False,
+        }]
+    units = r"(minute|minutes|min|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years|yr|yrs)"
+    if re.search(r"\b\d+(?:\.\d+)?\s*" + units + r"\b", t):
+        return []
+    return [{
+        "severity": "warning",
+        "line": line_label,
+        "type": "unclear_interval",
+        "message": "Interval format is unclear. Use a simple duration such as 2 days or write unknown.",
+        "blocking": False,
+    }]
+
 def validate_cause_line_from_excel(
     cause_text: str,
     line_label: str,
@@ -1176,7 +1248,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "ill_defined",
-            "message": f"Best Excel match {code} is flagged as ill-defined/vague. Enter the disease or injury that caused it if available.",
+            "message": f"Suggested ICD code {code} appears ill-defined/vague. Enter the disease or injury that caused it if available.",
         })
 
     if is_excel_unlikely_to_cause_death(best):
@@ -1184,7 +1256,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "unlikely_cause",
-            "message": f"Best Excel match {code} is flagged as unlikely to cause death. Select a more appropriate condition if available.",
+            "message": f"Suggested ICD code {code} appears unlikely to cause death. Select a more appropriate condition if available.",
         })
 
     if role in {"underlying", "contributing", "immediate"} and acc is False:
@@ -1192,7 +1264,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "not_acceptable_main",
-            "message": f"Best Excel match {code} is marked as not acceptable as a main/underlying cause.",
+            "message": f"Suggested ICD code {code} may not be acceptable as the main or underlying cause of death.",
         })
 
     if not is_gender_allowed(best.get("gender_restriction", ""), sex_value):
@@ -1200,7 +1272,7 @@ def validate_cause_line_from_excel(
             "severity": "error",
             "line": line_label,
             "type": "gender_conflict",
-            "message": f"Best Excel match {code} conflicts with the patient sex restriction in the Excel file.",
+            "message": f"Suggested ICD code {code} conflicts with the patient sex restriction.",
         })
 
     return issues, candidates
@@ -2296,17 +2368,8 @@ elif st.session_state.page == 3:
     faiss_index = st.session_state.faiss_index
     bm25 = st.session_state.bm25_index
 
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Cause of Death — WHO Structured Form</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div style="background:#fffdf2;border-left:3px solid #C8A951;padding:9px 14px;'
-        'border-radius:6px;margin-bottom:1rem;font-size:.86rem;color:#4c4315">'
-        'Enter <b>one medical condition per line</b>. The form validates structure before ICD retrieval. '
-        'The lowest completed Part I line is the tentative starting point / UCOD candidate.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.caption("One medical condition per line. ICD suggestions appear after the causal sequence is ready.")
 
     part1_defs = [
         ("a", "Immediate cause", "immediate", "e.g., acute respiratory distress syndrome"),
@@ -2349,7 +2412,7 @@ elif st.session_state.page == 3:
             if raw_cause and cause != raw_cause.strip():
                 st.caption(f"Cleaned to: {cause}")
             if cause:
-                item = {"line": letter, "cause": cause, "interval": interval.strip() or "—"}
+                item = {"line": letter, "cause": cause, "interval": interval.strip()}
                 part1_chain.append(item)
                 if df_source is not None:
                     issues, cands = validate_cause_line_from_excel(
@@ -2391,7 +2454,7 @@ elif st.session_state.page == 3:
 
             cause = clean_cause_input(raw_cause)
             if cause:
-                item = {"line": f"II-{i}", "cause": cause, "interval": interval.strip() or "—"}
+                item = {"line": f"II-{i}", "cause": cause, "interval": interval.strip()}
                 part2_conditions.append(item)
                 if df_source is not None:
                     issues, cands = validate_cause_line_from_excel(
@@ -2476,11 +2539,11 @@ elif st.session_state.page == 3:
             else:
                 for x in precheck["part1_chain"]:
                     fd[f"part1_{x['line']}_cause"] = x["cause"]
-                    fd[f"part1_{x['line']}_interval"] = x["interval"]
+                    fd[f"part1_{x['line']}_interval"] = x.get("interval") or "—"
                 for x in precheck["part2_conditions"]:
                     idx = str(x["line"]).replace("II-", "")
                     fd[f"part2_{idx}_cause"] = x["cause"]
-                    fd[f"part2_{idx}_interval"] = x["interval"]
+                    fd[f"part2_{idx}_interval"] = x.get("interval") or "—"
 
                 narrative_parts = []
                 if precheck["part1_chain"]:
