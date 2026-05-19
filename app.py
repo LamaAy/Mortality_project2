@@ -114,6 +114,27 @@ section[data-testid="stSidebar"] .stTextInput input {
   border: 1px solid var(--border);
   box-shadow: 0 1px 6px rgba(0,0,0,.05);
 }
+
+.inline-note {
+  margin-top: -0.25rem;
+  margin-bottom: 0.55rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 7px;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+.inline-error { background:#fff1f1; color:#8a1f1f; border-left:3px solid #c0392b; }
+.inline-warning { background:#fff8e6; color:#6d4b00; border-left:3px solid #d8a100; }
+.inline-ok { background:#edf8f1; color:#006940; border-left:3px solid #006940; }
+.mini-status {
+  background:white; border:1px solid #edf2ed; border-radius:10px;
+  padding:.75rem .9rem; margin-bottom:.65rem;
+}
+.muted-box {
+  background:#f8faf8; border:1px solid #edf2ed; border-radius:8px;
+  padding:.65rem .75rem; margin:.5rem 0;
+}
+
 .section-title {
   color: var(--green);
   font-size: .95rem;
@@ -1248,7 +1269,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "ill_defined",
-            "message": f"Suggested ICD code {code} appears ill-defined/vague. Enter the disease or injury that caused it if available.",
+            "message": "This may be a terminal event or vague condition. Add the disease, infection source, or injury that caused it if available.",
         })
 
     if is_excel_unlikely_to_cause_death(best):
@@ -1256,7 +1277,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "unlikely_cause",
-            "message": f"Suggested ICD code {code} appears unlikely to cause death. Select a more appropriate condition if available.",
+            "message": "This condition may be unlikely to cause death by itself. Consider a more specific fatal disease or injury.",
         })
 
     if role in {"underlying", "contributing", "immediate"} and acc is False:
@@ -1264,7 +1285,7 @@ def validate_cause_line_from_excel(
             "severity": "warning",
             "line": line_label,
             "type": "not_acceptable_main",
-            "message": f"Suggested ICD code {code} may not be acceptable as the main or underlying cause of death.",
+            "message": "This condition may not be suitable as the main underlying cause. Consider adding the more specific disease that caused it.",
         })
 
     if not is_gender_allowed(best.get("gender_restriction", ""), sex_value):
@@ -1272,7 +1293,7 @@ def validate_cause_line_from_excel(
             "severity": "error",
             "line": line_label,
             "type": "gender_conflict",
-            "message": f"Suggested ICD code {code} conflicts with the patient sex restriction.",
+            "message": "This condition may conflict with the patient sex. Please verify the entry.",
         })
 
     return issues, candidates
@@ -2111,48 +2132,53 @@ def generate_certificate_pdf(
 # Sidebar
 # =============================================================================
 with st.sidebar:
-    st.markdown("### System Settings")
-    st.markdown("---")
-    st.markdown("### ICD Data Sources")
-    st.markdown(
-        '<div style="font-size:.78rem;opacity:.85;padding:.3rem 0;line-height:1.7">'
-        'Source of truth: Excel / metadata<br>'
-        'Retrieval: FAISS + BM25 + deterministic rules<br>'
-        'Extraction: Claude<br>'
-        'Coding: file candidates only</div>',
-        unsafe_allow_html=True,
-    )
-
-    if st.button("Reload ICD Data", use_container_width=True):
-        import shutil
-        if os.path.exists(CACHE_DIR):
-            shutil.rmtree(CACHE_DIR)
-        st.cache_resource.clear()
-        keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
-        for k in keys_to_remove:
-            del st.session_state[k]
-        st.session_state["df_source"] = None
-        st.session_state["df_metadata"] = None
-        st.session_state["faiss_index"] = None
-        st.session_state["bm25_index"] = None
-        st.session_state["icd_results"] = None
-        st.rerun()
-
-    st.markdown("---")
     st.markdown("### Hospital Information")
     hospital_name = st.text_input("Hospital Name", value="King Fahad Specialist Hospital")
     hospital_city = st.text_input("City", value="Riyadh")
     doctor_name   = st.text_input("Certifying Physician", value="")
 
     st.markdown("---")
-    if API_KEY:
-        st.success("Anthropic API key found.")
-    else:
-        st.error("ANTHROPIC_API_KEY missing in Streamlit secrets.")
+    st.markdown("### Navigation")
+    if st.button("Basic Information", use_container_width=True):
+        st.session_state.page = 1
+        st.rerun()
+    if st.button("Medical History", use_container_width=True):
+        st.session_state.page = 2
+        st.rerun()
+    if st.button("Cause of Death", use_container_width=True):
+        st.session_state.page = 3
+        st.rerun()
+    if st.button("Review & Coding", use_container_width=True):
+        st.session_state.page = 4
+        st.rerun()
+    if st.button("Final Certificate", use_container_width=True):
+        st.session_state.page = 5
+        st.rerun()
+
+    with st.expander("Admin / data status", expanded=False):
+        st.caption("Technical data status is hidden from the doctor workflow.")
+        if API_KEY:
+            st.success("API key available")
+        else:
+            st.error("ANTHROPIC_API_KEY missing")
+        if st.button("Reload coding data", use_container_width=True):
+            import shutil
+            if os.path.exists(CACHE_DIR):
+                shutil.rmtree(CACHE_DIR)
+            st.cache_resource.clear()
+            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.session_state["df_source"] = None
+            st.session_state["df_metadata"] = None
+            st.session_state["faiss_index"] = None
+            st.session_state["bm25_index"] = None
+            st.session_state["icd_results"] = None
+            st.rerun()
 
     st.markdown(
         '<div style="font-size:.72rem;opacity:.65;text-align:center;line-height:2;margin-top:.8rem">'
-        'Ministry of Health<br>Hybrid ICD-10 Coding v1</div>',
+        'Ministry of Health<br>Electronic Death Certificate</div>',
         unsafe_allow_html=True,
     )
 
@@ -2182,14 +2208,14 @@ if st.session_state["df_source"] is None:
     try:
         df_excel = load_excel_from_drive_file(GDRIVE_EXCEL_ID)
         st.session_state["df_source"] = df_excel
-        st.sidebar.success(f"Loaded {len(df_excel):,} ICD rows from Excel.")
+        # data loaded; hidden from doctor workflow
     except Exception as e:
         load_errors.append(f"Excel load failed: {e}")
 
     try:
         df_meta = load_metadata(GDRIVE_METADATA_ID)
         st.session_state["df_metadata"] = df_meta
-        st.sidebar.success(f"Loaded {len(df_meta):,} metadata rows.")
+        # metadata loaded; hidden from doctor workflow
     except Exception as e:
         load_errors.append(f"Metadata load failed: {e}")
 
@@ -2197,9 +2223,9 @@ if st.session_state["df_source"] is None:
         faiss_index = load_faiss_resources(GDRIVE_EMBEDDINGS_ID, GDRIVE_FAISS_ID)
         st.session_state["faiss_index"] = faiss_index
         if faiss_index is not None:
-            st.sidebar.success("FAISS ready.")
+            pass
         else:
-            st.sidebar.warning("FAISS unavailable. Semantic search disabled.")
+            pass
     except Exception as e:
         load_errors.append(f"FAISS load failed: {e}")
 
@@ -2208,15 +2234,15 @@ if st.session_state["df_source"] is None:
             bm25 = build_bm25_index(df_excel)
             st.session_state["bm25_index"] = bm25
             if bm25 is not None:
-                st.sidebar.success("BM25 ready.")
+                pass
             else:
-                st.sidebar.warning("BM25 unavailable. Using fallback keyword overlap.")
+                pass
     except Exception as e:
         load_errors.append(f"BM25 load failed: {e}")
 
     if load_errors:
         for err in load_errors:
-            st.sidebar.error(err)
+            pass
 
 # =============================================================================
 # Step bar
@@ -2235,6 +2261,72 @@ def render_steps(current: int):
         html_s += f'<div class="{cls}">{i}. {escape(lbl)}</div>'
     html_s += "</div>"
     st.markdown(html_s, unsafe_allow_html=True)
+
+
+def inline_note(message: str, level: str = "warning") -> None:
+    icon = {"error": "✕", "warning": "⚠", "ok": "✓"}.get(level, "•")
+    css = {"error": "inline-error", "warning": "inline-warning", "ok": "inline-ok"}.get(level, "inline-warning")
+    st.markdown(f'<div class="inline-note {css}">{icon} {escape(message)}</div>', unsafe_allow_html=True)
+
+def issue_line_key(issue: Dict) -> str:
+    line = str(issue.get("line", "")).lower()
+    m = re.search(r"part\s*i\s*\(([a-d])\)", line)
+    if m:
+        return f"part1_{m.group(1)}"
+    m = re.search(r"part\s*ii\s*\(?([0-9]+)\)?", line)
+    if m:
+        return f"part2_{m.group(1)}"
+    m = re.search(r"ii[-\s]*([0-9]+)", line)
+    if m:
+        return f"part2_{m.group(1)}"
+    return "global"
+
+def group_issues_by_field(issues: List[Dict]) -> Dict[str, List[Dict]]:
+    out = {}
+    for issue in issues:
+        out.setdefault(issue_line_key(issue), []).append(issue)
+    return out
+
+def parse_interval_to_hours(interval_text: str) -> Optional[float]:
+    t = normalize_text_basic(interval_text)
+    if not t or t in {"unknown", "unk", "not known", "n/a", "na", "-", "—"}:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(minute|minutes|min|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years|yr|yrs)", t)
+    if not m:
+        return None
+    val = float(m.group(1)); unit = m.group(2)
+    if unit.startswith("min"): return val / 60.0
+    if unit in {"hour", "hours", "hr", "hrs"}: return val
+    if unit.startswith("day"): return val * 24
+    if unit.startswith("week"): return val * 24 * 7
+    if unit.startswith("month"): return val * 24 * 30
+    if unit in {"year", "years", "yr", "yrs"}: return val * 24 * 365
+    return None
+
+def add_cross_field_cod_issues(part1_chain: List[Dict], part2_conditions: List[Dict]) -> List[Dict]:
+    issues = []
+    part1_keys = {normalize_cause_key(x.get("cause", "")): x for x in part1_chain if normalize_cause_key(x.get("cause", ""))}
+    for x in part2_conditions:
+        key = normalize_cause_key(x.get("cause", ""))
+        if key and key in part1_keys:
+            issues.append({"severity": "warning", "line": str(x.get("line", "Part II")), "type": "part2_repeats_part1", "message": "This condition is already in Part I. Part II should include only conditions that contributed but were not in the direct causal chain.", "blocking": False})
+    cleaned = [x for x in part1_chain if x.get("cause")]
+    for upper, lower in zip(cleaned, cleaned[1:]):
+        h_upper = parse_interval_to_hours(upper.get("interval", ""))
+        h_lower = parse_interval_to_hours(lower.get("interval", ""))
+        if h_upper is not None and h_lower is not None and h_lower < h_upper:
+            issues.append({"severity": "warning", "line": f"Part I ({lower.get('line','')})", "type": "interval_order", "message": "The cause below usually starts before the condition above. Check whether this interval should be longer or equal.", "blocking": False})
+    return issues
+
+def decide_sp_rule_simple(part1_chain: List[Dict], blocking: bool) -> Dict:
+    filled = [x for x in part1_chain if str(x.get("cause", "")).strip()]
+    if not filled:
+        return {"rule": "", "title": "No starting point yet", "selected": "", "message": "Enter Part I causes to determine the starting point."}
+    if len(filled) == 1:
+        return {"rule": "SP1/SP2", "title": "Single Part I cause", "selected": filled[0].get("cause", ""), "message": "Only one Part I line is completed, so that condition is the tentative starting point."}
+    if blocking:
+        return {"rule": "Review", "title": "Sequence needs review", "selected": filled[-1].get("cause", ""), "message": "The lowest completed line is shown as tentative, but structural issues must be fixed before coding."}
+    return {"rule": "SP3", "title": "Valid causal sequence assumed", "selected": filled[-1].get("cause", ""), "message": "If the lower cause explains the entries above, the lowest completed Part I line is selected as the starting point."}
 
 # =============================================================================
 # PAGE 1
@@ -2369,155 +2461,120 @@ elif st.session_state.page == 3:
     bm25 = st.session_state.bm25_index
 
     st.markdown('<div class="section-title">Cause of Death — WHO Structured Form</div>', unsafe_allow_html=True)
-    st.caption("One medical condition per line. ICD suggestions appear after the causal sequence is ready.")
+    st.caption("Enter one medical condition per line. Guidance appears directly under the line that needs attention.")
 
     part1_defs = [
-        ("a", "Immediate cause", "immediate", "e.g., acute respiratory distress syndrome"),
-        ("b", "Due to / as a consequence of", "contributing", "e.g., septic shock"),
-        ("c", "Due to / as a consequence of", "contributing", "e.g., generalized peritonitis"),
-        ("d", "Underlying cause", "underlying", "e.g., perforated sigmoid diverticulitis"),
+        ("a", "Immediate cause", "immediate", "e.g., septic shock"),
+        ("b", "Due to / as a consequence of", "contributing", "e.g., generalized peritonitis"),
+        ("c", "Due to / as a consequence of", "contributing", "e.g., perforated sigmoid diverticulitis"),
+        ("d", "Due to / as a consequence of", "underlying", "optional if line (c) is the underlying cause"),
     ]
 
-    left, right = st.columns([1.55, 1.0], gap="large")
-    part1_chain = []
-    part2_conditions = []
+    raw_part1, raw_part2 = [], []
+    for letter, label, role, placeholder in part1_defs:
+        raw_cause = st.session_state.get(f"part1_{letter}_cause", fd.get(f"part1_{letter}_cause", ""))
+        raw_interval = st.session_state.get(f"part1_{letter}_interval", fd.get(f"part1_{letter}_interval", ""))
+        cause = clean_cause_input(raw_cause)
+        if cause:
+            raw_part1.append({"line": letter, "cause": cause, "interval": str(raw_interval or "").strip(), "role": role})
+    for i in range(1, 4):
+        raw_cause = st.session_state.get(f"part2_{i}_cause", fd.get(f"part2_{i}_cause", ""))
+        raw_interval = st.session_state.get(f"part2_{i}_interval", fd.get(f"part2_{i}_interval", ""))
+        cause = clean_cause_input(raw_cause)
+        if cause:
+            raw_part2.append({"line": f"II-{i}", "cause": cause, "interval": str(raw_interval or "").strip(), "role": "other"})
+
+    precheck = pre_validate_structured_cod(raw_part1, raw_part2)
+    cross_issues = add_cross_field_cod_issues(precheck["part1_chain"], precheck["part2_conditions"])
+    all_pre_issues = list(precheck["issues"]) + cross_issues
+
     live_excel_issues = []
     live_candidates = {}
+    if df_source is not None:
+        for x in precheck["part1_chain"]:
+            role = "immediate" if x["line"] == "a" else ("underlying" if x["line"] == precheck["part1_chain"][-1]["line"] else "contributing")
+            issues, cands = validate_cause_line_from_excel(
+                cause_text=x["cause"], line_label=f"Part I ({x['line']})", role=role,
+                df_source=df_source, faiss_index=faiss_index, bm25=bm25,
+                sex_value=fd.get("sex", ""), age_years=fd.get("age_years", 0), top_k=5,
+            )
+            live_excel_issues.extend(issues)
+            live_candidates[f"Part I ({x['line']})"] = cands
+        for x in precheck["part2_conditions"]:
+            idx = str(x["line"]).replace("II-", "")
+            issues, cands = validate_cause_line_from_excel(
+                cause_text=x["cause"], line_label=f"Part II ({idx})", role="other",
+                df_source=df_source, faiss_index=faiss_index, bm25=bm25,
+                sex_value=fd.get("sex", ""), age_years=fd.get("age_years", 0), top_k=5,
+            )
+            live_excel_issues.extend(issues)
+            live_candidates[f"Part II ({idx})"] = cands
+
+    all_issues = all_pre_issues + live_excel_issues
+    issues_by_field = group_issues_by_field(all_issues)
+    has_any_cod_input = bool(precheck["part1_chain"] or precheck["part2_conditions"])
+    blocking_issues = [x for x in all_pre_issues if x.get("severity") == "error"]
+    nonblocking_issues = [x for x in all_issues if x.get("severity") != "error"]
+    tentative = precheck.get("tentative_underlying", {})
+    sp_info = decide_sp_rule_simple(precheck["part1_chain"], bool(blocking_issues))
+
+    left, right = st.columns([1.65, 0.95], gap="large")
 
     with left:
         st.markdown('<div class="section-title">Part I — Direct causal sequence</div>', unsafe_allow_html=True)
-        st.caption("Each lower line should explain or give rise to the line above it.")
+        st.caption("The condition on each lower line should explain the line above it.")
 
         for letter, label, role, placeholder in part1_defs:
-            c0, c1, c2 = st.columns([0.09, 0.66, 0.25])
+            c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
             with c0:
                 st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#006940'>({letter})</div>", unsafe_allow_html=True)
             with c1:
-                raw_cause = st.text_input(
-                    label,
-                    value=fd.get(f"part1_{letter}_cause", ""),
-                    key=f"part1_{letter}_cause",
-                    placeholder=placeholder,
-                )
+                raw_cause = st.text_input(label, value=fd.get(f"part1_{letter}_cause", ""), key=f"part1_{letter}_cause", placeholder=placeholder)
             with c2:
-                interval = st.text_input(
-                    "Interval",
-                    value=fd.get(f"part1_{letter}_interval", ""),
-                    key=f"part1_{letter}_interval",
-                    placeholder="e.g., 2 days",
-                )
-
-            cause = clean_cause_input(raw_cause)
-            if raw_cause and cause != raw_cause.strip():
-                st.caption(f"Cleaned to: {cause}")
-            if cause:
-                item = {"line": letter, "cause": cause, "interval": interval.strip()}
-                part1_chain.append(item)
-                if df_source is not None:
-                    issues, cands = validate_cause_line_from_excel(
-                        cause_text=cause,
-                        line_label=f"Part I ({letter})",
-                        role=role,
-                        df_source=df_source,
-                        faiss_index=faiss_index,
-                        bm25=bm25,
-                        sex_value=fd.get("sex", ""),
-                        age_years=fd.get("age_years", 0),
-                        top_k=5,
-                    )
-                    live_excel_issues.extend(issues)
-                    live_candidates[f"Part I ({letter})"] = cands
+                interval = st.text_input("Interval", value=fd.get(f"part1_{letter}_interval", ""), key=f"part1_{letter}_interval", placeholder="e.g., 2 days")
+            field_key = f"part1_{letter}"
+            for issue in issues_by_field.get(field_key, [])[:3]:
+                inline_note(issue.get("message", "Please review this line."), "error" if issue.get("severity") == "error" else "warning")
+            cause_now = clean_cause_input(st.session_state.get(f"part1_{letter}_cause", raw_cause))
+            if cause_now and field_key not in issues_by_field:
+                inline_note("Line format looks acceptable.", "ok")
 
         st.markdown("---")
         st.markdown('<div class="section-title">Part II — Other significant conditions</div>', unsafe_allow_html=True)
-        st.caption("Conditions contributing to death but not part of the direct causal chain.")
+        st.caption("Use Part II only for conditions that contributed to death but were not part of the direct chain.")
 
         for i in range(1, 4):
-            c0, c1, c2 = st.columns([0.09, 0.66, 0.25])
+            c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
             with c0:
                 st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#1a4a7a'>II-{i}</div>", unsafe_allow_html=True)
             with c1:
-                raw_cause = st.text_input(
-                    f"Other significant condition {i}",
-                    value=fd.get(f"part2_{i}_cause", ""),
-                    key=f"part2_{i}_cause",
-                    placeholder="e.g., type 2 diabetes mellitus",
-                )
+                raw_cause = st.text_input(f"Other significant condition {i}", value=fd.get(f"part2_{i}_cause", ""), key=f"part2_{i}_cause", placeholder="e.g., type 2 diabetes mellitus")
             with c2:
-                interval = st.text_input(
-                    "Interval",
-                    value=fd.get(f"part2_{i}_interval", ""),
-                    key=f"part2_{i}_interval",
-                    placeholder="e.g., 12 years",
-                )
-
-            cause = clean_cause_input(raw_cause)
-            if cause:
-                item = {"line": f"II-{i}", "cause": cause, "interval": interval.strip()}
-                part2_conditions.append(item)
-                if df_source is not None:
-                    issues, cands = validate_cause_line_from_excel(
-                        cause_text=cause,
-                        line_label=f"Part II ({i})",
-                        role="other",
-                        df_source=df_source,
-                        faiss_index=faiss_index,
-                        bm25=bm25,
-                        sex_value=fd.get("sex", ""),
-                        age_years=fd.get("age_years", 0),
-                        top_k=5,
-                    )
-                    live_excel_issues.extend(issues)
-                    live_candidates[f"Part II ({i})"] = cands
-
-
-    precheck = pre_validate_structured_cod(part1_chain, part2_conditions)
-    has_any_cod_input = bool(part1_chain or part2_conditions)
-    blocking_issues = [x for x in precheck["issues"] if x.get("severity") == "error"]
-    warnings = [x for x in precheck["issues"] if x.get("severity") != "error"] + live_excel_issues
-    tentative = precheck.get("tentative_underlying", {})
+                interval = st.text_input("Interval", value=fd.get(f"part2_{i}_interval", ""), key=f"part2_{i}_interval", placeholder="e.g., 12 years")
+            field_key = f"part2_{i}"
+            for issue in issues_by_field.get(field_key, [])[:3]:
+                inline_note(issue.get("message", "Please review this line."), "error" if issue.get("severity") == "error" else "warning")
+            cause_now = clean_cause_input(st.session_state.get(f"part2_{i}_cause", raw_cause))
+            if cause_now and field_key not in issues_by_field:
+                inline_note("Contributing condition recorded.", "ok")
 
     with right:
-        st.markdown('<div class="section-title">Medical Coding Assistant</div>', unsafe_allow_html=True)
-
-        # Empty state: do not show errors before the doctor starts entering causes.
+        st.markdown('<div class="section-title">Assistant</div>', unsafe_allow_html=True)
         if not has_any_cod_input:
-            st.caption("The underlying cause and ICD suggestions will appear after Part I is completed.")
+            st.markdown('<div class="mini-status"><b>Ready when you are</b><br><span style="color:#5a7060;font-size:.84rem">Start with Part I line (a). No warnings are shown before typing.</span></div>', unsafe_allow_html=True)
         else:
-            if precheck["blocking"]:
-                st.warning("Please review the cause-of-death form before coding.")
+            if blocking_issues:
+                st.markdown('<div class="mini-status"><b style="color:#c0392b">Review needed before coding</b><br><span style="color:#5a7060;font-size:.84rem">Fix the messages shown under each field.</span></div>', unsafe_allow_html=True)
+            elif nonblocking_issues:
+                st.markdown('<div class="mini-status"><b style="color:#a66a00">Coding possible, review suggested</b><br><span style="color:#5a7060;font-size:.84rem">Warnings are shown under the relevant field.</span></div>', unsafe_allow_html=True)
             else:
-                st.success("Ready for ICD coding.")
+                st.markdown('<div class="mini-status"><b style="color:#006940">Ready for coding</b><br><span style="color:#5a7060;font-size:.84rem">No live warnings detected.</span></div>', unsafe_allow_html=True)
 
             if tentative:
-                st.markdown(
-                    f"<div style='background:#f8faf8;border:1px solid #edf2ed;border-radius:6px;padding:.65rem;margin:.6rem 0'>"
-                    f"<b style='color:#006940'>Tentative underlying cause:</b><br>"
-                    f"<span style='font-size:.92rem'>{escape(tentative.get('cause','—'))}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-            if blocking_issues:
-                st.markdown("**Please review**")
-                for issue in blocking_issues:
-                    doctor_issue_card(issue)
-
-            if warnings:
-                st.markdown("**Suggestions**")
-                for issue in warnings[:6]:
-                    doctor_issue_card(issue)
-                if len(warnings) > 6:
-                    st.caption(f"+ {len(warnings) - 6} more suggestions hidden.")
-            elif not blocking_issues and part1_chain:
-                st.caption("No live warnings detected.")
-
-            # Keep retrieval details hidden from doctors. Full candidates remain available in Review & Coding if needed.
-            if df_source is None:
-                st.error("ICD source data is not loaded.")
-            elif not precheck["blocking"]:
-                st.caption("ICD suggestions will be generated on the Review & Coding page.")
-
+                st.markdown(f'<div class="muted-box"><b style="color:#006940">Tentative UCOD</b><br>{escape(tentative.get("cause", "—"))}</div>', unsafe_allow_html=True)
+            if sp_info.get("rule"):
+                st.markdown(f'<div class="muted-box"><b>{escape(sp_info.get("rule", ""))}: {escape(sp_info.get("title", ""))}</b><br><span style="font-size:.82rem;color:#5a7060">{escape(sp_info.get("message", ""))}</span></div>', unsafe_allow_html=True)
+            st.caption("Full ICD coding runs on the Review & Coding page.")
 
     b1, b2, _ = st.columns([1, 1.8, 5.5])
     with b1:
@@ -2525,11 +2582,12 @@ elif st.session_state.page == 3:
             st.session_state.page = 2
             st.rerun()
     with b2:
-        if st.button("Analyze & Find Codes", use_container_width=True, type="primary", disabled=(not has_any_cod_input or precheck["blocking"])):
+        can_analyze = bool(precheck["part1_chain"]) and not bool(blocking_issues)
+        if st.button("Review & Find Codes", use_container_width=True, type="primary", disabled=(not can_analyze)):
             if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
-                st.error("ICD source data failed to load. Please check the data source configuration.")
+                st.error("Coding source data failed to load. Please check Admin / data status.")
             elif not API_KEY:
                 st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
             else:
@@ -2540,17 +2598,16 @@ elif st.session_state.page == 3:
                     idx = str(x["line"]).replace("II-", "")
                     fd[f"part2_{idx}_cause"] = x["cause"]
                     fd[f"part2_{idx}_interval"] = x.get("interval") or "—"
-
                 narrative_parts = []
                 if precheck["part1_chain"]:
                     narrative_parts.append(" due to ".join([f"{x['cause']} ({x['interval']})" for x in precheck["part1_chain"]]))
                 if precheck["part2_conditions"]:
                     narrative_parts.append("Other significant conditions included " + ", ".join([f"{x['cause']} ({x['interval']})" for x in precheck["part2_conditions"]]))
-
                 st.session_state.form_data.update(fd)
                 st.session_state.form_data["manual_part1_chain"] = precheck["part1_chain"]
                 st.session_state.form_data["manual_part2_conditions"] = precheck["part2_conditions"]
-                st.session_state.form_data["precheck_issues"] = precheck["issues"]
+                st.session_state.form_data["precheck_issues"] = all_pre_issues
+                st.session_state.form_data["sp_preview"] = sp_info
                 st.session_state.form_data["free_text"] = ". ".join(narrative_parts) + "."
                 st.session_state.icd_results = None
                 st.session_state.page = 4
