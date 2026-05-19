@@ -1313,7 +1313,7 @@ def determine_starting_point_from_structured_part1(part1_chain: List[Dict]) -> D
 def validate_certificate(coded_causes: List[Dict], sex_value: str) -> Dict:
     issues = []
 
-    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
 
     if not part1:
         issues.append("Part I is empty.")
@@ -1926,7 +1926,7 @@ def generate_certificate_pdf(
     story.append(Spacer(1, 2 * mm))
 
     row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
-    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
     part2 = [x for x in coded_causes if x["role"] == "other"]
 
     for i, item in enumerate(part1):
@@ -2398,6 +2398,348 @@ def decide_sp_rule_simple(part1_chain: List[Dict], blocking: bool, sequence_scre
     # Do not claim SP3 from clean formatting alone.
     return {"rule": "SP3", "title": "Pending sequence review", "selected": "", "message": sequence_screen.get("message", "Sequence review is required before SP3 can be applied."), "confirmed": False}
 
+
+# =============================================================================
+# SP1-SP8 STARTING POINT ENGINE
+# =============================================================================
+def _certificate_conditions(part1_chain: List[Dict], part2_conditions: List[Dict]) -> List[Dict]:
+    """Return all non-empty certificate conditions in certificate order."""
+    rows = []
+    for x in part1_chain or []:
+        cause = clean_cause_input(x.get("cause", ""))
+        if cause:
+            rows.append({"section": "Part I", "line": str(x.get("line", "")).lower(), "cause": cause})
+    for x in part2_conditions or []:
+        cause = clean_cause_input(x.get("cause", ""))
+        if cause:
+            rows.append({"section": "Part II", "line": str(x.get("line", "")), "cause": cause})
+    return rows
+
+def _coded_by_line(coded_causes: List[Dict]) -> Dict[str, Dict]:
+    out = {}
+    for item in coded_causes or []:
+        line = str(item.get("line", "")).lower()
+        if line:
+            out[line] = item
+    return out
+
+def _coded_by_cause(coded_causes: List[Dict]) -> Dict[str, Dict]:
+    out = {}
+    for item in coded_causes or []:
+        key = normalize_cause_key(item.get("cause", ""))
+        if key:
+            out[key] = item
+    return out
+
+def selected_code_for_sp(sp_review: Dict, coded_causes: List[Dict]) -> str:
+    """Find selected ICD code from the selected SP line/cause."""
+    by_line = _coded_by_line(coded_causes)
+    line = str(sp_review.get("selected_line", "")).lower()
+    if line in by_line:
+        return by_line[line].get("code_formatted", "")
+    by_cause = _coded_by_cause(coded_causes)
+    key = normalize_cause_key(sp_review.get("selected_cause", ""))
+    if key in by_cause:
+        return by_cause[key].get("code_formatted", "")
+    return ""
+
+
+def apply_sp_result_to_validation(validation: Dict, sp_review: Dict, coded_causes: List[Dict]) -> Dict:
+    """
+    Preserve the SP-selected starting point independently from ICD coding.
+
+    Important logic:
+    - SP3/SP4/etc. may successfully select a starting-point *cause text*.
+    - ICD coding for that cause may still be missing/manual-review.
+    - Therefore the certificate should not show an empty UCOD just because the ICD code is pending.
+    """
+    out = dict(validation or {})
+    selected_cause = str(sp_review.get("selected_cause", "") or "").strip()
+    selected_line = str(sp_review.get("selected_line", "") or "").strip()
+    selected_code = str(sp_review.get("selected_code", "") or selected_code_for_sp(sp_review, coded_causes) or "").strip()
+
+    out["sp_review"] = sp_review
+    out["sp_rule"] = str(sp_review.get("sp_rule", "REVIEW") or "REVIEW")
+    out["starting_point_rule"] = out["sp_rule"]
+    out["starting_point_line"] = selected_line
+    out["starting_point_text"] = selected_cause
+
+    # Keep both text and code. Never erase the selected cause text if the code is pending.
+    if selected_cause:
+        out["underlying_cause_text"] = selected_cause
+    else:
+        out["underlying_cause_text"] = out.get("underlying_cause_text", "") or "Not confirmed"
+
+    if selected_code:
+        out["underlying_cause"] = selected_code
+        out["underlying_cause_code_status"] = "selected"
+    elif selected_cause:
+        out["underlying_cause"] = "Pending ICD review"
+        out["underlying_cause_code_status"] = "pending"
+    else:
+        out["underlying_cause"] = "Not confirmed"
+        out["underlying_cause_code_status"] = "not_confirmed"
+
+    return out
+
+def condition_flag_summary(item: Dict) -> Dict:
+    """Summarize Excel/metadata acceptability flags for SP7/SP8."""
+    acc = acceptable_main_bool(item.get("acceptable_main", ""))
+    return {
+        "line": str(item.get("line", "")),
+        "cause": str(item.get("cause", "")),
+        "code": str(item.get("code_formatted", "")),
+        "acceptable_main": acc,
+        "ill_defined": is_excel_ill_defined(item),
+        "unlikely_to_cause_death": is_excel_unlikely_to_cause_death(item),
+        "gender_restriction": str(item.get("gender_restriction", "")),
+        "note": str(item.get("note", "")),
+    }
+
+def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Dict]) -> Dict:
+    """Safe fallback if LLM sequence review is unavailable."""
+    conditions = _certificate_conditions(part1_chain, part2_conditions)
+    part1 = [x for x in conditions if x["section"] == "Part I"]
+    if len(conditions) == 1:
+        x = conditions[0]
+        return {
+            "sp_rule": "SP1",
+            "selected_line": x["line"],
+            "selected_cause": x["cause"],
+            "full_sequence_valid": None,
+            "partial_sequence_valid": None,
+            "causal_links": [],
+            "warnings": [],
+            "needs_manual_review": False,
+            "explanation": "Only one condition is reported on the certificate.",
+        }
+    if len(part1) == 1:
+        x = part1[0]
+        return {
+            "sp_rule": "SP2",
+            "selected_line": x["line"],
+            "selected_cause": x["cause"],
+            "full_sequence_valid": None,
+            "partial_sequence_valid": None,
+            "causal_links": [],
+            "warnings": [],
+            "needs_manual_review": False,
+            "explanation": "Only one line is used in Part I.",
+        }
+    if part1:
+        return {
+            "sp_rule": "REVIEW",
+            "selected_line": "",
+            "selected_cause": "",
+            "full_sequence_valid": False,
+            "partial_sequence_valid": False,
+            "causal_links": [],
+            "warnings": ["Medical sequence review is required before SP3-SP8 can be applied."],
+            "needs_manual_review": True,
+            "explanation": "Multiple Part I lines are present, so causal sequence review is required.",
+        }
+    return {
+        "sp_rule": "REVIEW",
+        "selected_line": "",
+        "selected_cause": "",
+        "full_sequence_valid": False,
+        "partial_sequence_valid": False,
+        "causal_links": [],
+        "warnings": ["No Part I condition is available."],
+        "needs_manual_review": True,
+        "explanation": "Part I is empty.",
+    }
+
+def llm_sp1_sp8_review(api_key: str, part1_chain: List[Dict], part2_conditions: List[Dict], coded_causes: List[Dict]) -> Dict:
+    """
+    Apply simplified WHO-inspired SP1-SP8 logic.
+    The LLM judges medical causality only. It must select only from written certificate causes.
+    Excel/metadata flags are passed for SP7/SP8 refinement.
+    """
+    conditions = _certificate_conditions(part1_chain, part2_conditions)
+    part1 = [x for x in conditions if x["section"] == "Part I"]
+
+    # SP1/SP2 are deterministic and do not need LLM.
+    base = deterministic_sp_fallback(part1_chain, part2_conditions)
+    if base["sp_rule"] in {"SP1", "SP2"}:
+        return base
+
+    if not api_key or not part1:
+        return base
+
+    coded_flags = [condition_flag_summary(x) for x in coded_causes or []]
+
+    system_prompt = """
+You are a mortality-certificate starting-point reviewer.
+
+Task:
+Apply simplified WHO-inspired SP1-SP8 logic to identify the Starting Point from the certificate.
+The Starting Point becomes the basis for selecting the Underlying Cause of Death (UCOD).
+
+Strict rules:
+- Use only conditions already written in Part I or Part II.
+- Do not invent new diseases or add new causes.
+- Do not assign ICD codes.
+- Do not rewrite the doctor's causes.
+- Judge whether the Part I causal sequence is medically plausible.
+- If unsure, set needs_manual_review=true.
+- Return only valid JSON.
+
+SP logic:
+SP1: If only one condition is reported anywhere, select it.
+SP2: If only one Part I line is used, select that line.
+SP3: If multiple Part I lines are used and the lowest completed Part I line explains all entries above, select the lowest line.
+SP4: If the lowest line does not explain all entries above, but a valid partial sequence reaches the terminal condition on line (a), select the origin of that valid partial sequence.
+SP5: If no causal relationship can be established in Part I, select the first-mentioned Part I condition.
+SP6: If an obvious better underlying cause is present elsewhere on the certificate, select/suggest it.
+SP7: If the selected cause is ill-defined/vague, select a more specific condition from the certificate if available.
+SP8: If the selected cause is trivial or unlikely to cause death, select a more appropriate condition from the certificate if available.
+
+Return JSON exactly:
+{
+  "sp_rule": "SP3|SP4|SP5|SP6|SP7|SP8|REVIEW",
+  "selected_line": "a|b|c|d|II-1|II-2|II-3|",
+  "selected_cause": "string",
+  "full_sequence_valid": true,
+  "partial_sequence_valid": true,
+  "causal_links": [
+    {"from_lower_line": "b", "to_upper_line": "a", "valid": true, "reason": "short reason"}
+  ],
+  "warnings": ["string"],
+  "needs_manual_review": false,
+  "explanation": "short explanation"
+}
+"""
+    user_payload = {
+        "part1_chain_immediate_to_underlying": part1_chain,
+        "part2_conditions": part2_conditions,
+        "excel_metadata_flags_for_certificate_causes": coded_flags,
+        "instruction": "Apply SP1-SP8. Select only a cause already written in this payload. Do not invent conditions or ICD codes.",
+    }
+
+    fallback = base.copy()
+    try:
+        out = call_claude_json(
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=json.dumps(user_payload, ensure_ascii=False, indent=2),
+            max_tokens=1000,
+            fallback=fallback,
+        )
+        if not isinstance(out, dict):
+            return fallback
+        allowed = {normalize_cause_key(x["cause"]): x for x in conditions}
+        selected_key = normalize_cause_key(out.get("selected_cause", ""))
+        selected_line = str(out.get("selected_line", "")).lower()
+        line_ok = any(str(x["line"]).lower() == selected_line for x in conditions)
+        cause_ok = selected_key in allowed if selected_key else False
+        if out.get("sp_rule") not in {"SP3", "SP4", "SP5", "SP6", "SP7", "SP8", "REVIEW"}:
+            out["sp_rule"] = "REVIEW"
+            out["needs_manual_review"] = True
+        if out.get("sp_rule") != "REVIEW" and not (line_ok or cause_ok):
+            out["sp_rule"] = "REVIEW"
+            out["selected_line"] = ""
+            out["selected_cause"] = ""
+            out.setdefault("warnings", []).append("LLM selected a condition that was not found on the certificate.")
+            out["needs_manual_review"] = True
+        return {
+            "sp_rule": str(out.get("sp_rule", "REVIEW")),
+            "selected_line": str(out.get("selected_line", "") or ""),
+            "selected_cause": str(out.get("selected_cause", "") or ""),
+            "full_sequence_valid": out.get("full_sequence_valid", False),
+            "partial_sequence_valid": out.get("partial_sequence_valid", False),
+            "causal_links": list(out.get("causal_links", []) or []),
+            "warnings": list(out.get("warnings", []) or []),
+            "needs_manual_review": bool(out.get("needs_manual_review", False)),
+            "explanation": str(out.get("explanation", "") or ""),
+        }
+    except Exception as e:
+        fallback.setdefault("warnings", []).append(f"SP review failed: {type(e).__name__}: {e}")
+        fallback["needs_manual_review"] = True
+        return fallback
+
+def refine_sp7_sp8_with_excel(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
+    """Use Excel/metadata flags to refine selected starting point for SP7/SP8."""
+    if not coded_causes:
+        return sp_review
+
+    by_line = _coded_by_line(coded_causes)
+    by_cause = _coded_by_cause(coded_causes)
+    selected = None
+    line = str(sp_review.get("selected_line", "")).lower()
+    if line in by_line:
+        selected = by_line[line]
+    else:
+        selected = by_cause.get(normalize_cause_key(sp_review.get("selected_cause", "")))
+
+    if not selected:
+        return sp_review
+
+    selected_bad_sp7 = is_excel_ill_defined(selected)
+    selected_bad_sp8 = is_excel_unlikely_to_cause_death(selected) or acceptable_main_bool(selected.get("acceptable_main", "")) is False
+    if not (selected_bad_sp7 or selected_bad_sp8):
+        return sp_review
+
+    # Prefer a more specific acceptable Part I cause, lowest first, then Part II.
+    part1 = [x for x in coded_causes if x.get("role") in {"immediate", "contributing", "underlying"}]
+    part2 = [x for x in coded_causes if x.get("role") == "other"]
+    candidates = list(reversed(part1)) + part2
+    replacement = None
+    for item in candidates:
+        if item is selected:
+            continue
+        if is_excel_ill_defined(item):
+            continue
+        if is_excel_unlikely_to_cause_death(item):
+            continue
+        if acceptable_main_bool(item.get("acceptable_main", "")) is False:
+            continue
+        if item.get("code_formatted"):
+            replacement = item
+            break
+
+    out = dict(sp_review)
+    out.setdefault("warnings", [])
+    if selected_bad_sp7:
+        out["warnings"].append(f"Selected starting point '{selected.get('cause','')}' appears ill-defined or vague based on coding metadata.")
+        if replacement:
+            out["sp_rule"] = "SP7"
+    elif selected_bad_sp8:
+        out["warnings"].append(f"Selected starting point '{selected.get('cause','')}' may be unlikely or not acceptable as the underlying cause based on coding metadata.")
+        if replacement:
+            out["sp_rule"] = "SP8"
+
+    if replacement:
+        out["selected_line"] = str(replacement.get("line", ""))
+        out["selected_cause"] = str(replacement.get("cause", ""))
+        out["needs_manual_review"] = True
+        out["explanation"] = (out.get("explanation", "") + " " if out.get("explanation") else "") + "A more specific/acceptable condition from the certificate was suggested based on coding metadata."
+    else:
+        out["needs_manual_review"] = True
+        out["explanation"] = (out.get("explanation", "") + " " if out.get("explanation") else "") + "No clearly better certificate condition was found automatically; manual review is required."
+    return out
+
+def apply_sp_engine(api_key: str, concepts: Dict, coded_causes: List[Dict]) -> Dict:
+    part1_chain = concepts.get("part1_chain", []) or []
+    part2_conditions = concepts.get("part2_conditions", []) or []
+    sp = llm_sp1_sp8_review(api_key, part1_chain, part2_conditions, coded_causes)
+    sp = refine_sp7_sp8_with_excel(sp, coded_causes)
+    sp["selected_code"] = selected_code_for_sp(sp, coded_causes)
+    return sp
+
+def quality_from_sp_and_validation(coded_causes: List[Dict], validation: Dict, sp_review: Dict) -> str:
+    if not coded_causes:
+        return "Needs Review"
+    if any(not x.get("code_formatted") for x in coded_causes):
+        return "Needs Review"
+    if any(str(x.get("selection_status", "")) == "manual_review" for x in coded_causes):
+        return "Needs Review"
+    if sp_review.get("needs_manual_review") or sp_review.get("sp_rule") in {"REVIEW", "SP5", "SP7", "SP8"}:
+        return "Needs Review"
+    if validation.get("coding_issues"):
+        return "Needs Review"
+    return "Excellent"
+
 # =============================================================================
 # PAGE 1
 # =============================================================================
@@ -2775,11 +3117,22 @@ elif st.session_state.page == 4:
     concepts = results["concepts"]
     validation = results["validation"]
 
+    # Apply SP1-SP8 only on the Review & Coding page.
+    # The Cause of Death page performs structure validation only and never assumes SP3.
+    if "sp_review" not in validation:
+        with st.spinner("Reviewing SP1-SP8 starting point logic..."):
+            sp_review = apply_sp_engine(API_KEY, concepts, coded_causes)
+        validation = apply_sp_result_to_validation(validation, sp_review, coded_causes)
+        validation["overall_quality"] = quality_from_sp_and_validation(coded_causes, validation, sp_review)
+        st.session_state.icd_results["validation"] = validation
+
+    sp_review = validation.get("sp_review", {})
     quality = validation.get("overall_quality", "")
     q_color = {"Excellent": "#006940", "Good": "#2d7a4f", "Needs Review": "#c0392b"}.get(quality, "#888")
 
     if quality:
         underlying = validation.get("underlying_cause", "—")
+        underlying_text = validation.get("underlying_cause_text", "")
         issues = validation.get("coding_issues", [])
         who_notes = validation.get("who_notes", "")
 
@@ -2793,10 +3146,31 @@ elif st.session_state.page == 4:
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem;gap:12px;flex-wrap:wrap">'
             '<b style="color:' + q_color + ';font-size:.95rem">Validation Result — ' + escape(quality) + '</b>'
             '<span style="background:' + q_color + ';color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">'
-            'Underlying cause for mortality statistics: ' + escape(underlying or "—") + '</span></div>'
+            'Starting point: ' + escape(underlying_text or "Not confirmed") + ' | ICD: ' + escape(underlying or "—") + '</span></div>'
             '<ul style="margin:.3rem 0 .3rem 1rem">' + issues_html + '</ul>'
             + ('<div style="font-size:.82rem;color:#444;margin-top:.4rem">' + escape(who_notes) + '</div>' if who_notes else '')
             + '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Doctor-facing SP rule summary
+    if sp_review:
+        sp_rule = sp_review.get("sp_rule", "REVIEW")
+        selected_cause = sp_review.get("selected_cause", "") or "Not confirmed"
+        selected_line = sp_review.get("selected_line", "") or "—"
+        selected_code = sp_review.get("selected_code", "") or validation.get("underlying_cause", "") or "Pending ICD review"
+        sp_color = "#006940" if sp_rule in {"SP1", "SP2", "SP3", "SP4", "SP6"} and not sp_review.get("needs_manual_review") else "#c27c00"
+        warnings_html = "".join(f'<li>{escape(w)}</li>' for w in sp_review.get("warnings", []) or [])
+        if not warnings_html:
+            warnings_html = '<li>No SP-specific warnings.</li>'
+        st.markdown(
+            '<div style="background:white;border:1px solid #d7e6db;border-left:4px solid ' + sp_color + ';border-radius:8px;padding:1rem 1.2rem;margin-bottom:1rem">'
+            '<div style="font-weight:800;color:' + sp_color + ';font-size:.95rem;margin-bottom:.35rem">Starting Point Review — ' + escape(sp_rule) + '</div>'
+            '<div style="font-size:.86rem;color:#1a2e1a"><b>Selected starting point:</b> ' + escape(selected_cause) + ' <span style="color:#667">(line ' + escape(selected_line) + ')</span></div>'
+            '<div style="font-size:.86rem;color:#1a2e1a"><b>Selected ICD code:</b> ' + escape(selected_code) + '</div>'
+            '<div style="font-size:.82rem;color:#444;margin-top:.45rem">' + escape(sp_review.get("explanation", "")) + '</div>'
+            '<ul style="font-size:.8rem;color:#7a5200;margin:.45rem 0 0 1rem">' + warnings_html + '</ul>'
+            '</div>',
             unsafe_allow_html=True,
         )
 
@@ -2821,7 +3195,7 @@ elif st.session_state.page == 4:
             long_val = item.get("long_desc", "")
             notes_val = item.get("selection_notes", "")
             source_note = item.get("note", "")
-            show_badge = item["role"] in {"immediate", "contributing"}
+            show_badge = item["role"] in {"immediate", "contributing", "underlying"}
 
             badge_html = (
                 '<span style="background:' + bg_acc + ';color:white;border-radius:4px;'
@@ -2884,6 +3258,7 @@ elif st.session_state.page == 4:
                 st.session_state.icd_results["validation"] = validate_certificate(
                     st.session_state.icd_results["coded_causes"], fd.get("sex", "")
                 )
+                st.session_state.icd_results["validation"].pop("sp_review", None)
                 st.rerun()
 
             with st.expander("Top retrieved candidates"):
@@ -2906,7 +3281,7 @@ elif st.session_state.page == 4:
         cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
         cert_no_safe = sanitize_filename(cert_no)
 
-        part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+        part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
         part2 = [x for x in coded_causes if x["role"] == "other"]
 
         row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
@@ -2931,6 +3306,7 @@ elif st.session_state.page == 4:
         )
 
         underlying_code = validation.get("underlying_cause", "—")
+        underlying_text = validation.get("underlying_cause_text", "")
 
         st.markdown(
             '<div class="cert-preview">'
@@ -2976,7 +3352,8 @@ elif st.session_state.page == 4:
             '<div style="background:#f0f4ff;border-radius:6px;padding:.7rem 1rem;'
             'margin-bottom:1.4rem;border:1px solid #b0c4de;font-size:.85rem">'
             '<b style="color:#1a4a7a">Underlying Cause (for mortality statistics):</b> '
-            '<span style="font-family:monospace;font-weight:800;font-size:.95rem">' + escape(underlying_code or "—") + '</span></div>'
+            '<span style="font-weight:700">' + escape(underlying_text or "Not confirmed") + '</span>'
+            ' <span style="font-family:monospace;font-weight:800;font-size:.95rem">[' + escape(underlying_code or "—") + ']</span></div>'
 
             '<div style="display:flex;justify-content:space-between;padding-top:1.2rem;border-top:1px solid #d0ddd2;gap:12px;flex-wrap:wrap">'
             '<div><div style="font-weight:700;color:var(--green);font-size:.85rem">Certifying Physician</div>'
@@ -3085,7 +3462,7 @@ elif st.session_state.page == 5:
     validation = results.get("validation", {})
     concepts = results.get("concepts", {})
 
-    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing"}]
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
     part2 = [x for x in coded_causes if x["role"] == "other"]
 
     cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
