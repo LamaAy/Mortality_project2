@@ -3285,14 +3285,29 @@ elif st.session_state.page == 4:
         part2 = [x for x in coded_causes if x["role"] == "other"]
 
         row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
+        selected_line_for_cert = str(validation.get("starting_point_line", "") or validation.get("sp_review", {}).get("selected_line", "")).lower()
+        sp_rule_for_cert = str(validation.get("sp_rule", "") or validation.get("sp_review", {}).get("sp_rule", "REVIEW"))
         part1_rows = ""
         for i, x in enumerate(part1):
+            line_id = str(x.get("line", "")).lower()
+            is_starting_point = bool(selected_line_for_cert and line_id == selected_line_for_cert)
+            row_style = (
+                'background:#f0f4ff;border:1.5px solid #1a4a7a;border-radius:6px;padding:.45rem .55rem;margin:.35rem 0;'
+                if is_starting_point else
+                'border-bottom:1px solid #e8ede9;padding:.36rem 0;'
+            )
+            code_display = escape(x.get("code_formatted", "")) if x.get("code_formatted", "") else '<span style="color:#999">Pending ICD review</span>'
+            sp_badge = (
+                ' <span style="background:#1a4a7a;color:white;border-radius:4px;padding:2px 7px;font-size:.68rem;margin-left:6px">STARTING POINT</span>'
+                if is_starting_point else ''
+            )
             part1_rows += (
-                '<div class="cert-field"><span class="cert-label">'
+                '<div class="cert-field" style="' + row_style + '"><span class="cert-label">'
                 + escape(row_labels[i] if i < len(row_labels) else f"({i+1})")
                 + (' Immediate cause' if i == 0 else ' Due to')
+                + sp_badge
                 + '</span><span>'
-                + escape(x["cause"]) + ' — <b>' + escape(x.get("code_formatted", "")) + '</b>'
+                + escape(x["cause"]) + ' — <b>' + code_display + '</b>'
                 + ' <span style="font-size:.78rem;color:#666">(' + escape(x.get("interval", "—")) + ')</span>'
                 + '</span></div>'
             )
@@ -3337,6 +3352,14 @@ elif st.session_state.page == 4:
             '<div class="cert-field"><span class="cert-label">Type of Death</span><span>' + escape(fd.get("death_type", "—")) + '</span></div>'
             '</div></div>'
 
+            '<div style="background:#f0f4ff;border-radius:6px;padding:.85rem 1rem;'
+            'margin-bottom:1rem;border:1px solid #b0c4de;font-size:.86rem">'
+            '<div style="font-weight:800;color:#1a4a7a;margin-bottom:.25rem">Starting Point / UCOD Decision</div>'
+            '<div><b>Rule:</b> ' + escape(sp_rule_for_cert) + '</div>'
+            '<div><b>Selected starting point:</b> ' + escape(underlying_text or "Not confirmed") + '</div>'
+            '<div><b>ICD status:</b> ' + escape(underlying_code or "Pending ICD review") + '</div>'
+            '</div>'
+
             '<div style="background:var(--green-light);border-radius:6px;padding:1rem 1.2rem;'
             'margin-bottom:1rem;border:1px solid #9ecaad">'
             '<div style="font-weight:700;color:var(--green);margin-bottom:.6rem">Part I — Direct causal sequence</div>'
@@ -3353,7 +3376,8 @@ elif st.session_state.page == 4:
             'margin-bottom:1.4rem;border:1px solid #b0c4de;font-size:.85rem">'
             '<b style="color:#1a4a7a">Underlying Cause (for mortality statistics):</b> '
             '<span style="font-weight:700">' + escape(underlying_text or "Not confirmed") + '</span>'
-            ' <span style="font-family:monospace;font-weight:800;font-size:.95rem">[' + escape(underlying_code or "—") + ']</span></div>'
+            ' <span style="font-family:monospace;font-weight:800;font-size:.95rem">[' + escape(underlying_code or "Pending ICD review") + ']</span>'
+            ' <span style="color:#667;font-size:.78rem">via ' + escape(sp_rule_for_cert) + '</span></div>'
 
             '<div style="display:flex;justify-content:space-between;padding-top:1.2rem;border-top:1px solid #d0ddd2;gap:12px;flex-wrap:wrap">'
             '<div><div style="font-weight:700;color:var(--green);font-size:.85rem">Certifying Physician</div>'
