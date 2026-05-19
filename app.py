@@ -2318,15 +2318,85 @@ def add_cross_field_cod_issues(part1_chain: List[Dict], part2_conditions: List[D
             issues.append({"severity": "warning", "line": f"Part I ({lower.get('line','')})", "type": "interval_order", "message": "The cause below usually starts before the condition above. Check whether this interval should be longer or equal.", "blocking": False})
     return issues
 
-def decide_sp_rule_simple(part1_chain: List[Dict], blocking: bool) -> Dict:
+def live_sequence_screen(part1_chain: List[Dict]) -> Dict:
+    """
+    Lightweight live screen for obvious causal-sequence problems.
+
+    Important: this function does NOT prove SP3. It only prevents the UI from
+    saying SP3 is valid when the chain is obviously disconnected. Full sequence
+    reasoning still runs on the Review & Coding page.
+    """
     filled = [x for x in part1_chain if str(x.get("cause", "")).strip()]
+    if len(filled) <= 1:
+        return {
+            "valid": None,
+            "status": "single",
+            "message": "Single Part I cause; SP3 does not apply.",
+            "problem_line": "",
+        }
+
+    # Exact duplicate adjacent causes are never a causal explanation.
+    for upper, lower in zip(filled, filled[1:]):
+        if normalize_cause_key(upper.get("cause", "")) == normalize_cause_key(lower.get("cause", "")):
+            return {
+                "valid": False,
+                "status": "invalid",
+                "message": "The lower line repeats the line above instead of explaining it.",
+                "problem_line": str(lower.get("line", "")),
+            }
+
+    # Obvious unrelated pairs for live UX. This is intentionally conservative.
+    # It catches clearly bad test cases without pretending to be a full WHO engine.
+    unrelated_pairs = [
+        ("chronic gastritis", "femur fracture"),
+        ("chronic gastritis", "acute respiratory failure"),
+        ("femur fracture", "acute respiratory failure"),
+        ("migraine", "septic shock"),
+        ("osteoarthritis", "septic shock"),
+        ("diabetes", "acute respiratory distress syndrome"),
+        ("diabetes mellitus", "acute respiratory distress syndrome"),
+        ("hypertension", "acute respiratory distress syndrome"),
+        ("chronic kidney disease", "pneumonia"),
+    ]
+
+    # For each pair, lower should explain upper. If lower/upper is in unrelated list, flag it.
+    for upper, lower in zip(filled, filled[1:]):
+        upper_c = normalize_text_basic(upper.get("cause", ""))
+        lower_c = normalize_text_basic(lower.get("cause", ""))
+        for bad_lower, bad_upper in unrelated_pairs:
+            if bad_lower in lower_c and bad_upper in upper_c:
+                return {
+                    "valid": False,
+                    "status": "invalid",
+                    "message": f"SP3 cannot be confirmed: {lower.get('cause', '')} does not reasonably explain {upper.get('cause', '')}.",
+                    "problem_line": str(lower.get("line", "")),
+                }
+
+    return {
+        "valid": None,
+        "status": "pending",
+        "message": "SP3 requires sequence review. Format is acceptable, but the causal relationship has not been confirmed yet.",
+        "problem_line": "",
+    }
+
+def decide_sp_rule_simple(part1_chain: List[Dict], blocking: bool, sequence_screen: Optional[Dict] = None) -> Dict:
+    filled = [x for x in part1_chain if str(x.get("cause", "")).strip()]
+    sequence_screen = sequence_screen or live_sequence_screen(filled)
+
     if not filled:
-        return {"rule": "", "title": "No starting point yet", "selected": "", "message": "Enter Part I causes to determine the starting point."}
+        return {"rule": "", "title": "No starting point yet", "selected": "", "message": "Enter Part I causes to determine the starting point.", "confirmed": False}
+
     if len(filled) == 1:
-        return {"rule": "SP1/SP2", "title": "Single Part I cause", "selected": filled[0].get("cause", ""), "message": "Only one Part I line is completed, so that condition is the tentative starting point."}
+        return {"rule": "SP1/SP2", "title": "Single Part I cause", "selected": filled[0].get("cause", ""), "message": "Only one Part I line is completed, so that condition is the tentative starting point.", "confirmed": True}
+
     if blocking:
-        return {"rule": "Review", "title": "Sequence needs review", "selected": filled[-1].get("cause", ""), "message": "The lowest completed line is shown as tentative, but structural issues must be fixed before coding."}
-    return {"rule": "SP3", "title": "Valid causal sequence assumed", "selected": filled[-1].get("cause", ""), "message": "If the lower cause explains the entries above, the lowest completed Part I line is selected as the starting point."}
+        return {"rule": "Review", "title": "Fix structure first", "selected": "", "message": "Structural issues must be fixed before any starting point is selected.", "confirmed": False}
+
+    if sequence_screen.get("valid") is False:
+        return {"rule": "SP3", "title": "Not applied", "selected": "", "message": sequence_screen.get("message", "The causal sequence cannot be confirmed."), "confirmed": False}
+
+    # Do not claim SP3 from clean formatting alone.
+    return {"rule": "SP3", "title": "Pending sequence review", "selected": "", "message": sequence_screen.get("message", "Sequence review is required before SP3 can be applied."), "confirmed": False}
 
 # =============================================================================
 # PAGE 1
@@ -2486,7 +2556,18 @@ elif st.session_state.page == 3:
 
     precheck = pre_validate_structured_cod(raw_part1, raw_part2)
     cross_issues = add_cross_field_cod_issues(precheck["part1_chain"], precheck["part2_conditions"])
-    all_pre_issues = list(precheck["issues"]) + cross_issues
+    sequence_screen = live_sequence_screen(precheck["part1_chain"])
+    sequence_issues = []
+    if sequence_screen.get("valid") is False:
+        problem_line = sequence_screen.get("problem_line") or (precheck["part1_chain"][-1].get("line", "") if precheck["part1_chain"] else "")
+        sequence_issues.append({
+            "severity": "warning",
+            "line": f"Part I ({problem_line})" if problem_line else "Part I",
+            "type": "sequence_not_confirmed",
+            "message": sequence_screen.get("message", "This causal sequence needs review before SP3 can be applied."),
+            "blocking": False,
+        })
+    all_pre_issues = list(precheck["issues"]) + cross_issues + sequence_issues
 
     live_excel_issues = []
     live_candidates = {}
@@ -2516,7 +2597,7 @@ elif st.session_state.page == 3:
     blocking_issues = [x for x in all_pre_issues if x.get("severity") == "error"]
     nonblocking_issues = [x for x in all_issues if x.get("severity") != "error"]
     tentative = precheck.get("tentative_underlying", {})
-    sp_info = decide_sp_rule_simple(precheck["part1_chain"], bool(blocking_issues))
+    sp_info = decide_sp_rule_simple(precheck["part1_chain"], bool(blocking_issues), sequence_screen)
 
     left, right = st.columns([1.65, 0.95], gap="large")
 
@@ -2571,7 +2652,10 @@ elif st.session_state.page == 3:
                 st.markdown('<div class="mini-status"><b style="color:#006940">Ready for coding</b><br><span style="color:#5a7060;font-size:.84rem">No live warnings detected.</span></div>', unsafe_allow_html=True)
 
             if tentative:
-                st.markdown(f'<div class="muted-box"><b style="color:#006940">Tentative UCOD</b><br>{escape(tentative.get("cause", "—"))}</div>', unsafe_allow_html=True)
+                if sp_info.get("confirmed"):
+                    st.markdown(f'<div class="muted-box"><b style="color:#006940">Tentative UCOD</b><br>{escape(tentative.get("cause", "—"))}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="muted-box"><b style="color:#a66a00">Tentative UCOD</b><br>Not confirmed until sequence review</div>', unsafe_allow_html=True)
             if sp_info.get("rule"):
                 st.markdown(f'<div class="muted-box"><b>{escape(sp_info.get("rule", ""))}: {escape(sp_info.get("title", ""))}</b><br><span style="font-size:.82rem;color:#5a7060">{escape(sp_info.get("message", ""))}</span></div>', unsafe_allow_html=True)
             st.caption("Full ICD coding runs on the Review & Coding page.")
