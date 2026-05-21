@@ -298,6 +298,21 @@ section[data-testid="stSidebar"] .stTextInput input {
   background: #fff8e6;
   border-color: #edd187;
 }
+/* Smaller action buttons for the sequential agent workspace. */
+div[data-testid="stButton"] > button {
+  padding: .38rem .85rem !important;
+  font-size: .82rem !important;
+  min-height: 2.15rem !important;
+  border-radius: 8px !important;
+  line-height: 1.2 !important;
+}
+
+.agent-button-hint {
+  color: var(--muted);
+  font-size: .76rem;
+  margin-top: -.25rem;
+  margin-bottom: .45rem;
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -3866,39 +3881,23 @@ def render_agent_stepper(current_step: int) -> None:
     st.markdown('<div class="agent-mini-stepper">' + "".join(html_pills) + '</div>', unsafe_allow_html=True)
 
 def render_agent_card_header(step: int, title: str, subtitle: str, state: str = "active") -> None:
-    """Compact title card only.
-
-    Important: do not leave an open HTML <div> across Streamlit widgets.
-    Streamlit renders each element separately, so an open div creates an empty
-    square and the output appears outside it. The actual agent output is
-    rendered by render_agent_result() as its own bordered square/card.
-    """
-    state_class = "active" if state == "active" else ("done" if state == "done" else "blocked")
-    st.markdown(
-        f"""
-        <div class="agent-card {state_class}">
-          <div class="agent-kicker">AGENT {step}</div>
-          <div class="agent-title">{escape(title)}</div>
-          <div class="agent-subtitle">{escape(subtitle)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def close_agent_card() -> None:
-    # No-op in compact mode. Cards are closed inside render_agent_card_header().
+    # Deprecated in compact mode. Title and output are rendered together by render_agent_result().
     return
 
-def render_agent_result(result: Dict) -> None:
-    """Compact agent output renderer.
-    Shows only the agent result summary and a very short issue count.
-    Detailed findings, candidate tables, prompts, and rule internals are intentionally hidden.
-    """
+def close_agent_card() -> None:
+    return
+
+def render_agent_result(result: Dict, step: int, title: str, waiting_text: str = "Run this agent to see its output.") -> None:
+    # Render the agent name and output inside one bordered square/card.
     if not result:
-        st.markdown(
-            '<div class="agent-output-box">Run this agent to see its output.</div>',
-            unsafe_allow_html=True,
+        html_out = (
+            '<div class="agent-output-box">'
+            f'<div class="agent-kicker">AGENT {step}</div>'
+            f'<div class="agent-title">{escape(title)}</div>'
+            f'<div class="agent-hidden-details-note">{escape(waiting_text)}</div>'
+            '</div>'
         )
+        st.markdown(html_out, unsafe_allow_html=True)
         return
 
     status = str(result.get("status", "warning")).lower()
@@ -3933,6 +3932,8 @@ def render_agent_result(result: Dict) -> None:
 
     html_out = (
         f'<div class="{box_class}">'
+        f'<div class="agent-kicker">AGENT {step}</div>'
+        f'<div class="agent-title">{escape(title)}</div>'
         f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
         f'<div>{escape(summary)}</div>'
         f'<div class="agent-hidden-details-note">{escape(output_note)}</div>'
@@ -4548,7 +4549,9 @@ elif st.session_state.page == 4:
             )
             render_agent_prompt_box(AGENT1_SYSTEM_PROMPT)
 
-            if st.button("Run Agent 1 — Validate Input", type="primary", use_container_width=True):
+            render_agent_result(st.session_state.get("agent1_result"), 1, "Input Validation Agent", "Run Agent 1 to validate the doctor input.")
+
+            if st.button("Run Agent 1 — Validate Input", type="primary"):
                 save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
                 with st.spinner("Agent 1 is reviewing the doctor input..."):
                     st.session_state.agent1_result = agent1_input_validation_with_llm(
@@ -4559,10 +4562,8 @@ elif st.session_state.page == 4:
                 st.session_state.agent1_done = True
                 st.rerun()
 
-            render_agent_result(st.session_state.get("agent1_result"))
-
             can_go_next = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
-            if st.button("Next → Agent 2", use_container_width=True, disabled=not can_go_next):
+            if st.button("Next → Agent 2", disabled=not can_go_next):
                 st.session_state.agent_step = 2
                 st.rerun()
 
@@ -4574,7 +4575,7 @@ elif st.session_state.page == 4:
         elif st.session_state.agent_step == 2:
             if not st.session_state.get("agent1_done"):
                 st.warning("Run Agent 1 first.")
-                if st.button("Back to Agent 1", use_container_width=True):
+                if st.button("Back to Agent 1"):
                     st.session_state.agent_step = 1
                     st.rerun()
                 st.stop()
@@ -4606,9 +4607,11 @@ elif st.session_state.page == 4:
             )
             render_agent_prompt_box(AGENT2_SYSTEM_PROMPT)
 
+            render_agent_result(st.session_state.get("agent2_result"), 2, "ICD Candidate Validation Agent", "Run Agent 2 to retrieve and select ICD codes.")
+
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
-                if st.button("Run Agent 2 — Retrieve & Select ICD Codes", type="primary", use_container_width=True):
+                if st.button("Run Agent 2 — Retrieve & Select ICD Codes", type="primary"):
                     save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
                     extracted = {
                         "part1_chain": part1_chain,
@@ -4634,11 +4637,9 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_result = None
                     st.rerun()
             with b_back:
-                if st.button("← Back to Agent 1", use_container_width=True):
+                if st.button("← Back to Agent 1"):
                     st.session_state.agent_step = 1
                     st.rerun()
-
-            render_agent_result(st.session_state.get("agent2_result"))
 
             # Compact UI: ICD candidate tables are hidden here.
             # The selected codes remain stored in st.session_state.icd_results and appear on the final certificate page.
@@ -4648,7 +4649,7 @@ elif st.session_state.page == 4:
                 and bool(st.session_state.get("icd_results"))
                 and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
             )
-            if st.button("Next → Agent 3", use_container_width=True, disabled=not can_go_next):
+            if st.button("Next → Agent 3", disabled=not can_go_next):
                 st.session_state.agent_step = 3
                 st.rerun()
 
@@ -4660,7 +4661,7 @@ elif st.session_state.page == 4:
         elif st.session_state.agent_step == 3:
             if not st.session_state.get("agent2_done") or not st.session_state.get("icd_results"):
                 st.warning("Run Agent 2 first.")
-                if st.button("Back to Agent 2", use_container_width=True):
+                if st.button("Back to Agent 2"):
                     st.session_state.agent_step = 2
                     st.rerun()
                 st.stop()
@@ -4670,7 +4671,7 @@ elif st.session_state.page == 4:
 
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
-                if st.button("Run Agent 3 — WHO / TABB Review", type="primary", use_container_width=True):
+                if st.button("Run Agent 3 — WHO / TABB Review", type="primary"):
                     with st.spinner("Agent 3 is reviewing SP rules and TABB code relationships..."):
                         tabb_df = load_tabb_rules()
                         st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
@@ -4685,7 +4686,7 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_done = True
                     st.rerun()
             with b_back:
-                if st.button("← Back to Agent 2", use_container_width=True):
+                if st.button("← Back to Agent 2"):
                     st.session_state.agent_step = 2
                     st.rerun()
 
@@ -4696,11 +4697,11 @@ elif st.session_state.page == 4:
 
             b_final, b_new = st.columns([1.4, 1])
             with b_final:
-                if st.button("Go to Final Certificate", use_container_width=True, disabled=not bool(st.session_state.get("agent3_done"))):
+                if st.button("Go to Final Certificate", disabled=not bool(st.session_state.get("agent3_done"))):
                     st.session_state.page = 5
                     st.rerun()
             with b_new:
-                if st.button("New Certificate", use_container_width=True):
+                if st.button("New Certificate"):
                     keys_to_remove = [k for k in st.session_state.keys() if str(k).startswith("code_edit_") or str(k).startswith("agent_part")]
                     for k in keys_to_remove:
                         del st.session_state[k]
@@ -5062,7 +5063,7 @@ elif st.session_state.page == 5:
             st.rerun()
 
     with b3:
-        if st.button("New Certificate", use_container_width=True):
+        if st.button("New Certificate"):
             keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
             for k in keys_to_remove:
                 del st.session_state[k]
