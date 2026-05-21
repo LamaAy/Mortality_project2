@@ -272,6 +272,32 @@ section[data-testid="stSidebar"] .stTextInput input {
   font-size: .78rem;
   margin-top: .25rem;
 }
+.agent-sp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .55rem;
+  margin: .75rem 0;
+}
+.agent-sp-grid > div {
+  background: #f8faf8;
+  border: 1px solid #edf2ed;
+  border-radius: 10px;
+  padding: .55rem .65rem;
+  font-size: .82rem;
+}
+.agent-sp-links, .agent-sp-issues {
+  background: #f8faf8;
+  border: 1px solid #edf2ed;
+  border-radius: 10px;
+  padding: .6rem .7rem;
+  margin-top: .6rem;
+  font-size: .8rem;
+  color: #2d3b32;
+}
+.agent-sp-issues {
+  background: #fff8e6;
+  border-color: #edd187;
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -512,8 +538,20 @@ GDRIVE_EXCEL_ID      = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
 # Optional local TABB file. In Streamlit Cloud, place tabb_rules.csv beside this app file.
 TABB_RULES_CSV_PATHS = [
     "tabb_rules.csv",
+    "tabb_rule.csv",
+    "TABB_rules.csv",
+    "TABB_rule.csv",
+    "tabb_rules(1).csv",
     os.path.join(os.getcwd(), "tabb_rules.csv"),
+    os.path.join(os.getcwd(), "tabb_rule.csv"),
+    os.path.join(os.getcwd(), "TABB_rules.csv"),
+    os.path.join(os.getcwd(), "TABB_rule.csv"),
+    os.path.join(os.getcwd(), "tabb_rules(1).csv"),
     "/mnt/data/tabb_rules.csv",
+    "/mnt/data/tabb_rule.csv",
+    "/mnt/data/TABB_rules.csv",
+    "/mnt/data/TABB_rule.csv",
+    "/mnt/data/tabb_rules(1).csv",
 ]
 
 
@@ -2766,10 +2804,76 @@ def condition_flag_summary(item: Dict) -> Dict:
         "note": str(item.get("note", "")),
     }
 
+def _contains_any(text: str, terms: List[str]) -> bool:
+    t = normalize_text_basic(text)
+    return any(term in t for term in terms)
+
+
+def _causal_link_plausibility(lower_cause: str, upper_cause: str) -> Tuple[Optional[bool], str]:
+    """Conservative line-level causal screen for Agent 3."""
+    lower = normalize_text_basic(lower_cause)
+    upper = normalize_text_basic(upper_cause)
+    if not lower or not upper:
+        return None, "Missing cause text."
+
+    terminal_terms = [
+        "cardiac arrest", "respiratory arrest", "respiratory failure", "multi-organ failure",
+        "multiorgan failure", "multiple organ failure", "shock", "septic shock",
+        "cardiogenic shock", "acute respiratory distress syndrome", "ards"
+    ]
+
+    if _contains_any(lower, ["acute myocardial infarction", "myocardial infarction", "ami", "stemi", "nstemi"]):
+        if _contains_any(upper, ["cardiac arrest", "cardiogenic shock", "heart failure", "arrhythmia"]):
+            return True, "Acute myocardial infarction can directly lead to the terminal cardiac event above."
+    if _contains_any(lower, ["coronary artery disease", "coronary artery", "atherosclerotic heart disease", "ischemic heart disease", "ischaemic heart disease", "coronary atherosclerosis"]):
+        if _contains_any(upper, ["acute myocardial infarction", "myocardial infarction", "ami", "stemi", "nstemi", "cardiac arrest", "cardiogenic shock"]):
+            return True, "Chronic coronary/ischemic heart disease can lead to myocardial infarction or terminal cardiac events."
+
+    if _contains_any(lower, ["sepsis", "septicemia", "septicaemia"]):
+        if _contains_any(upper, ["septic shock", "multi-organ failure", "multiorgan failure", "multiple organ failure", "acute respiratory distress syndrome", "ards", "respiratory failure"]):
+            return True, "Sepsis can progress to shock, organ failure, or ARDS."
+    if _contains_any(lower, ["urinary tract infection", "uti", "pyelonephritis", "pneumonia", "peritonitis", "diverticulitis", "perforated", "abscess", "infection"]):
+        if _contains_any(upper, ["sepsis", "septic shock", "multi-organ failure", "multiorgan failure", "multiple organ failure"]):
+            return True, "The lower infectious source can explain sepsis/shock above."
+    if _contains_any(lower, ["peritonitis"]):
+        if _contains_any(upper, ["septic shock", "sepsis", "multi-organ failure", "multiorgan failure", "multiple organ failure"]):
+            return True, "Peritonitis can progress to sepsis or septic shock."
+    if _contains_any(lower, ["diverticulitis", "perforated sigmoid diverticulitis", "perforated diverticulitis", "bowel perforation", "intestinal perforation"]):
+        if _contains_any(upper, ["peritonitis", "sepsis", "septic shock"]):
+            return True, "Perforated diverticulitis can cause peritonitis and septic complications."
+
+    if _contains_any(lower, ["pneumonia", "influenza", "covid", "lower respiratory infection"]):
+        if _contains_any(upper, ["respiratory failure", "acute respiratory distress syndrome", "ards", "sepsis", "septic shock"]):
+            return True, "The respiratory infection can cause respiratory failure/ARDS or sepsis."
+    if _contains_any(lower, ["chronic obstructive pulmonary disease", "copd"]):
+        if _contains_any(upper, ["respiratory failure", "pneumonia"]):
+            return True, "COPD can underlie pneumonia or respiratory failure."
+
+    if _contains_any(lower, ["hypertension", "hypertensive", "high blood pressure"]):
+        if _contains_any(upper, ["intracranial hemorrhage", "cerebral hemorrhage", "brain hemorrhage", "stroke", "hypertensive crisis"]):
+            return True, "Hypertension can underlie intracranial hemorrhage or stroke."
+
+    if _contains_any(lower, ["deep vein thrombosis", "dvt", "immobilization", "immobility", "hip fracture", "fracture"]):
+        if _contains_any(upper, ["pulmonary embolism"]):
+            return True, "DVT/immobility/fracture can lead to pulmonary embolism."
+
+    if _contains_any(upper, terminal_terms):
+        if not _contains_any(lower, ["obesity", "old age", "unknown", "history of", "status post"]):
+            return True, "The upper line is a terminal event and the lower line provides a more specific cause."
+
+    if _contains_any(upper, ["pneumonia"]) and _contains_any(lower, ["acute myocardial infarction", "myocardial infarction", "coronary artery disease"]):
+        return False, "Myocardial infarction/coronary disease does not directly explain pneumonia in this Part I order."
+    if _contains_any(upper, ["septic shock", "sepsis"]) and _contains_any(lower, ["migraine", "osteoarthritis", "old age"]):
+        return False, "The lower condition is not a plausible direct source of sepsis/shock."
+
+    return None, "This causal link is not covered by the deterministic screen and needs clinical/LLM review."
+
+
 def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Dict]) -> Dict:
-    """Safe fallback if LLM sequence review is unavailable."""
+    """Line-aware deterministic SP screen used before/after the LLM."""
     conditions = _certificate_conditions(part1_chain, part2_conditions)
     part1 = [x for x in conditions if x["section"] == "Part I"]
+
     if len(conditions) == 1:
         x = conditions[0]
         return {
@@ -2781,8 +2885,9 @@ def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Di
             "causal_links": [],
             "warnings": [],
             "needs_manual_review": False,
-            "explanation": "Only one condition is reported on the certificate.",
+            "explanation": "SP1 applied because only one condition is reported on the certificate.",
         }
+
     if len(part1) == 1:
         x = part1[0]
         return {
@@ -2794,9 +2899,10 @@ def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Di
             "causal_links": [],
             "warnings": [],
             "needs_manual_review": False,
-            "explanation": "Only one line is used in Part I.",
+            "explanation": "SP2 applied because only one line is used in Part I.",
         }
-    if part1:
+
+    if not part1:
         return {
             "sp_rule": "REVIEW",
             "selected_line": "",
@@ -2804,21 +2910,82 @@ def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Di
             "full_sequence_valid": False,
             "partial_sequence_valid": False,
             "causal_links": [],
-            "warnings": ["Medical sequence review is required before SP3-SP8 can be applied."],
+            "warnings": ["No Part I condition is available."],
             "needs_manual_review": True,
-            "explanation": "Multiple Part I lines are present, so causal sequence review is required.",
+            "explanation": "Part I is empty, so no starting point can be selected.",
         }
+
+    links = []
+    all_known_valid = True
+    first_bad_index = None
+    first_uncertain_index = None
+    for idx, (upper, lower) in enumerate(zip(part1, part1[1:])):
+        ok, reason = _causal_link_plausibility(lower.get("cause", ""), upper.get("cause", ""))
+        link = {
+            "from_lower_line": lower.get("line", ""),
+            "from_lower_cause": lower.get("cause", ""),
+            "to_upper_line": upper.get("line", ""),
+            "to_upper_cause": upper.get("cause", ""),
+            "valid": ok,
+            "reason": reason,
+        }
+        links.append(link)
+        if ok is False and first_bad_index is None:
+            first_bad_index = idx
+            all_known_valid = False
+        elif ok is None and first_uncertain_index is None:
+            first_uncertain_index = idx
+            all_known_valid = False
+
+    if all_known_valid:
+        selected = part1[-1]
+        return {
+            "sp_rule": "SP3",
+            "selected_line": selected["line"],
+            "selected_cause": selected["cause"],
+            "full_sequence_valid": True,
+            "partial_sequence_valid": True,
+            "causal_links": links,
+            "warnings": [],
+            "needs_manual_review": False,
+            "explanation": f"SP3 applied because the lowest completed Part I line ({selected['line']}) explains the causal sequence above it.",
+        }
+
+    last_valid_index = -1
+    for idx, link in enumerate(links):
+        if link.get("valid") is True:
+            last_valid_index = idx
+        else:
+            break
+    if last_valid_index >= 0:
+        selected = part1[last_valid_index + 1]
+        problem = links[last_valid_index + 1] if (last_valid_index + 1) < len(links) else links[last_valid_index]
+        return {
+            "sp_rule": "SP4",
+            "selected_line": selected["line"],
+            "selected_cause": selected["cause"],
+            "full_sequence_valid": False,
+            "partial_sequence_valid": True,
+            "causal_links": links,
+            "warnings": [f"Full SP3 sequence not confirmed at line ({problem.get('from_lower_line','')}) → line ({problem.get('to_upper_line','')})."],
+            "needs_manual_review": True,
+            "explanation": f"SP4 applied: a valid partial sequence reaches line (a), but the full sequence to the lowest line is not confirmed. Selected line ({selected['line']}).",
+        }
+
+    problem_idx = first_bad_index if first_bad_index is not None else first_uncertain_index
+    problem = links[problem_idx] if problem_idx is not None and links else {}
     return {
         "sp_rule": "REVIEW",
         "selected_line": "",
         "selected_cause": "",
         "full_sequence_valid": False,
         "partial_sequence_valid": False,
-        "causal_links": [],
-        "warnings": ["No Part I condition is available."],
+        "causal_links": links,
+        "warnings": [f"SP3 not confirmed at line ({problem.get('from_lower_line','')}) → line ({problem.get('to_upper_line','')}). {problem.get('reason','')}"] if problem else ["Medical sequence review is required before SP3-SP8 can be applied."],
         "needs_manual_review": True,
-        "explanation": "Part I is empty.",
+        "explanation": "The Part I causal sequence could not be confirmed by the deterministic SP screen.",
     }
+
 
 def llm_sp1_sp8_review(api_key: str, part1_chain: List[Dict], part2_conditions: List[Dict], coded_causes: List[Dict]) -> Dict:
     """
@@ -2829,9 +2996,11 @@ def llm_sp1_sp8_review(api_key: str, part1_chain: List[Dict], part2_conditions: 
     conditions = _certificate_conditions(part1_chain, part2_conditions)
     part1 = [x for x in conditions if x["section"] == "Part I"]
 
-    # SP1/SP2 are deterministic and do not need LLM.
+    # SP1/SP2 and clearly valid deterministic SP3 do not need LLM disagreement.
     base = deterministic_sp_fallback(part1_chain, part2_conditions)
     if base["sp_rule"] in {"SP1", "SP2"}:
+        return base
+    if base.get("sp_rule") == "SP3" and base.get("full_sequence_valid") is True:
         return base
 
     if not api_key or not part1:
@@ -2912,7 +3081,7 @@ Return JSON exactly:
             out["selected_cause"] = ""
             out.setdefault("warnings", []).append("LLM selected a condition that was not found on the certificate.")
             out["needs_manual_review"] = True
-        return {
+        result = {
             "sp_rule": str(out.get("sp_rule", "REVIEW")),
             "selected_line": str(out.get("selected_line", "") or ""),
             "selected_cause": str(out.get("selected_cause", "") or ""),
@@ -2923,6 +3092,11 @@ Return JSON exactly:
             "needs_manual_review": bool(out.get("needs_manual_review", False)),
             "explanation": str(out.get("explanation", "") or ""),
         }
+        if base.get("sp_rule") == "SP3" and base.get("full_sequence_valid") is True:
+            return base
+        if result.get("sp_rule") == "REVIEW" and not result.get("selected_line") and base.get("causal_links"):
+            return base
+        return result
     except Exception as e:
         fallback.setdefault("warnings", []).append(f"SP review failed: {type(e).__name__}: {e}")
         fallback["needs_manual_review"] = True
@@ -3550,58 +3724,51 @@ def agent3_actionable_tabb_issues(tabb_result: Dict) -> List[Dict]:
     return actionable
 
 def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, List[Dict], str]:
-    """Decide Agent 3 status from SP/TABB sequence only.
-
-    Agent 2 owns ICD-code quality warnings. Agent 3 should be PASS when the
-    Part I causal sequence supports the selected UCOD and no actionable TABB
-    rule changes it.
-    """
+    """Decide Agent 3 status from SP/TABB sequence only, with line-level explanation."""
     issues: List[Dict] = []
     sp_rule = str(sp_review.get("sp_rule", "REVIEW") or "REVIEW").upper()
     selected = str(sp_review.get("selected_cause", "") or "").strip()
+    selected_line = str(sp_review.get("selected_line", "") or "").strip()
     selected_code = str(sp_review.get("selected_code", "") or "").strip()
 
     sequence_confirmed = (
-        sp_rule in {"SP1", "SP2", "SP3", "SP4", "SP6"}
+        sp_rule in {"SP1", "SP2", "SP3"}
         and bool(selected)
-        and not (sp_review.get("full_sequence_valid") is False and sp_rule in {"SP3"})
+        and sp_review.get("needs_manual_review") is False
+        and not (sp_review.get("full_sequence_valid") is False and sp_rule == "SP3")
     )
 
-    # Keep only true sequence warnings. Ignore coding-metadata wording that may
-    # be produced by the LLM or older SP refinements.
+    if sp_rule == "SP4":
+        sequence_confirmed = False
+
     for warning in sp_review.get("warnings", []) or []:
         w = str(warning).strip()
-        wl = w.lower()
         if not w:
             continue
-        if any(term in wl for term in [
-            "coding", "metadata", "ill-defined", "ill defined", "vague",
-            "acceptablemain", "not acceptable", "manual review", "r-code",
-        ]):
-            continue
-        if sequence_confirmed:
-            continue
-        issues.append({
-            "line": sp_review.get("selected_line", ""),
-            "severity": "warning",
-            "message": w,
-        })
+        issues.append({"line": selected_line or "Part I", "severity": "warning", "message": w})
 
-    if not sequence_confirmed:
+    if not sequence_confirmed and not issues:
         issues.append({
-            "line": sp_review.get("selected_line", ""),
+            "line": selected_line or "Part I",
             "severity": "warning",
             "message": sp_review.get("explanation", "SP/WHO review could not fully confirm the UCOD starting point."),
         })
 
-    issues.extend(agent3_actionable_tabb_issues(tabb_result))
+    actionable_tabb = agent3_actionable_tabb_issues(tabb_result)
+    issues.extend(actionable_tabb)
 
-    if not issues:
-        code_txt = f" ({selected_code})" if selected_code else ""
-        summary = f"UCOD sequence accepted. Selected starting point: {selected}{code_txt}."
+    code_txt = f" ({selected_code})" if selected_code else ""
+    line_txt = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (f"line {selected_line}" if selected_line else "no line")
+    if sequence_confirmed and not actionable_tabb:
+        summary = f"{sp_rule} applied. Selected UCOD starting point: {line_txt} — {selected}{code_txt}."
         return "pass", [], summary
 
-    return "warning", issues, "UCOD sequence needs review based on SP/WHO or actionable TABB findings."
+    if selected:
+        summary = f"{sp_rule} selected {line_txt} — {selected}{code_txt}, but review is suggested because the full sequence or TABB actionability was not fully confirmed."
+    else:
+        summary = "SP/WHO could not select a reliable UCOD starting point from the Part I sequence."
+    return "warning", issues, summary
+
 
 def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame) -> Dict:
     concepts = coded_results.get("concepts", {}) or {}
@@ -3771,6 +3938,89 @@ def render_agent_result(result: Dict) -> None:
         f'<div class="agent-hidden-details-note">{escape(output_note)}</div>'
         '</div>'
     )
+    st.markdown(html_out, unsafe_allow_html=True)
+
+def render_agent3_result(result: Dict) -> None:
+    """Agent 3 output card: title + SP rule + selected line + UCOD explanation in one square."""
+    if not result:
+        st.markdown(
+            '<div class="agent-output-box">'
+            '<div class="agent-kicker">AGENT 3</div>'
+            '<div class="agent-title">Mortality Sequence / WHO Rules Agent</div>'
+            '<div class="agent-hidden-details-note">Run Agent 3 to see the SP rule, selected line, and UCOD decision.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    status = str(result.get("status", "warning")).lower()
+    status_label = {"pass": "PASSED", "warning": "REVIEW SUGGESTED", "block": "BLOCKED"}.get(status, status.upper())
+    status_class = "block" if status == "block" else ("warn" if status == "warning" else "")
+    box_class = "agent-output-box" + (" warn" if status == "warning" else (" block" if status == "block" else ""))
+
+    sp = result.get("sp_review", {}) or {}
+    tabb = result.get("tabb_result", {}) or {}
+    summary = str(result.get("summary", "Agent completed its review.") or "Agent completed its review.")
+    sp_rule = str(sp.get("sp_rule", "Not available") or "Not available")
+    selected_line = str(sp.get("selected_line", "") or "")
+    selected_cause = str(sp.get("selected_cause", "") or "")
+    selected_code = str(sp.get("selected_code", "") or "")
+    explanation = str(sp.get("explanation", "") or "")
+    issues = result.get("issues", []) or result.get("rule_issues", []) or []
+
+    if selected_line in {"a", "b", "c", "d"}:
+        line_display = f"Part I ({selected_line})"
+    elif selected_line:
+        line_display = f"Line {selected_line}"
+    else:
+        line_display = "Not selected"
+
+    links = []
+    for link in sp.get("causal_links", []) or []:
+        valid = link.get("valid")
+        mark = "✓" if valid is True else ("⚠" if valid is None else "✗")
+        links.append(
+            f"{mark} line ({escape(link.get('from_lower_line',''))}) → line ({escape(link.get('to_upper_line',''))}): {escape(link.get('reason',''))}"
+        )
+    links_html = ""
+    if links:
+        links_html = '<div class="agent-sp-links"><b>Line checks:</b><br>' + "<br>".join(links[:4]) + "</div>"
+
+    issue_html = ""
+    if issues:
+        rows = []
+        for i in issues[:3]:
+            if isinstance(i, dict):
+                line = escape(i.get("line", ""))
+                msg = escape(i.get("message", ""))
+                rows.append(f"⚠ {line}: {msg}" if line else f"⚠ {msg}")
+        if rows:
+            issue_html = '<div class="agent-sp-issues"><b>Why review?</b><br>' + "<br>".join(rows) + "</div>"
+
+    tabb_text = "TABB loaded" if tabb.get("available") else "TABB not loaded"
+    if tabb.get("matches") or tabb.get("reverse_matches"):
+        tabb_text += f"; {len(tabb.get('matches', []) or []) + len(tabb.get('reverse_matches', []) or [])} code relationship match(es) found"
+    else:
+        tabb_text += "; no actionable TABB change found"
+
+    html_out = f"""
+    <div class="{box_class}">
+      <div class="agent-kicker">AGENT 3</div>
+      <div class="agent-title">Mortality Sequence / WHO Rules Agent</div>
+      <div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>
+      <div>{escape(summary)}</div>
+      <div class="agent-sp-grid">
+        <div><b>SP rule</b><br>{escape(sp_rule)}</div>
+        <div><b>Selected line</b><br>{escape(line_display)}</div>
+        <div><b>Selected cause</b><br>{escape(selected_cause or 'Not selected')}</div>
+        <div><b>Selected ICD</b><br>{escape(selected_code or 'Pending/none')}</div>
+      </div>
+      <div class="agent-hidden-details-note"><b>Reason:</b> {escape(explanation or summary)}</div>
+      <div class="agent-hidden-details-note"><b>TABB:</b> {escape(tabb_text)}</div>
+      {links_html}
+      {issue_html}
+    </div>
+    """
     st.markdown(html_out, unsafe_allow_html=True)
 
 def render_agent_prompt_box(prompt_text: str) -> None:
@@ -4415,31 +4665,8 @@ elif st.session_state.page == 4:
                     st.rerun()
                 st.stop()
 
-            render_agent_card_header(
-                3,
-                "Mortality Sequence / WHO Rules Agent",
-                "Applies SP1–SP8 starting-point logic and TABB ICD-code relationship checks, then confirms or flags the UCOD decision.",
-                state="active",
-            )
-            st.markdown(
-                """
-                <div class="agent-checklist">
-                <b>This agent validates:</b>
-                <ul>
-                  <li>SP1–SP8 starting-point logic</li>
-                  <li>Part I causal-chain plausibility</li>
-                  <li>TABB rules using normalized ICD codes</li>
-                  <li>UCOD decision and manual-review status</li>
-                </ul>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="agent-condition"><b>Final condition:</b><br>If SP/TABB is uncertain, the certificate remains marked as Needs Review.</div>',
-                unsafe_allow_html=True,
-            )
-            render_agent_prompt_box(AGENT3_SYSTEM_PROMPT)
+            # Agent 3 uses one compact square that contains both the title and the output.
+            render_agent3_result(st.session_state.get("agent3_result"))
 
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
@@ -4462,9 +4689,9 @@ elif st.session_state.page == 4:
                     st.session_state.agent_step = 2
                     st.rerun()
 
-            render_agent_result(st.session_state.get("agent3_result"))
+            # Agent 3 result is rendered above the run/back controls in one square.
 
-            # Compact UI: SP/TABB internals and final coded-cause tables are hidden here.
+            # Compact UI: final coded-cause tables are hidden here, but SP rule/line are shown inside the Agent 3 square.
             # The final certificate page keeps the complete coded result for review/download.
 
             b_final, b_new = st.columns([1.4, 1])
