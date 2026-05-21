@@ -229,6 +229,156 @@ section[data-testid="stSidebar"] .stTextInput input {
 </style>
 """, unsafe_allow_html=True)
 
+
+st.markdown("""
+<style>
+.agent-workspace-title {
+  color: var(--green);
+  font-size: 1rem;
+  font-weight: 800;
+  margin-bottom: .6rem;
+}
+.agent-card {
+  background: #ffffff;
+  border: 1.7px solid #c8dece;
+  border-radius: 18px;
+  padding: 1.15rem 1.25rem;
+  min-height: 430px;
+  box-shadow: 0 8px 22px rgba(0, 105, 64, .08);
+  margin-bottom: 1rem;
+}
+.agent-card.active {
+  border: 2px solid var(--green);
+  box-shadow: 0 10px 28px rgba(0, 105, 64, .14);
+}
+.agent-card.done {
+  border: 2px solid var(--gold);
+}
+.agent-card.blocked {
+  border: 2px solid var(--danger);
+}
+.agent-kicker {
+  display: inline-block;
+  background: var(--green-light);
+  color: var(--green);
+  border-radius: 999px;
+  padding: .22rem .65rem;
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .03em;
+  margin-bottom: .45rem;
+}
+.agent-title {
+  font-size: 1.05rem;
+  font-weight: 850;
+  color: #1a2e1a;
+  margin-bottom: .25rem;
+}
+.agent-subtitle {
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.45;
+  margin-bottom: .8rem;
+}
+.agent-checklist {
+  background: #f8faf8;
+  border: 1px solid #edf2ed;
+  border-radius: 12px;
+  padding: .75rem .85rem;
+  margin: .7rem 0;
+}
+.agent-checklist ul {
+  margin: .25rem 0 .1rem 1.1rem;
+  padding: 0;
+  font-size: .82rem;
+  line-height: 1.55;
+}
+.agent-prompt {
+  background: #f7faf8;
+  border: 1px dashed #bed4c3;
+  border-radius: 12px;
+  padding: .75rem .85rem;
+  color: #435649;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: .72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.agent-condition {
+  background: #f0f4ff;
+  border-left: 4px solid #1a4a7a;
+  border-radius: 10px;
+  padding: .65rem .8rem;
+  font-size: .82rem;
+  margin: .75rem 0;
+}
+.agent-status-pass {
+  background:#edf8f1;
+  color:#006940;
+  border:1px solid #b8dec6;
+  border-radius:10px;
+  padding:.55rem .75rem;
+  font-size:.84rem;
+  margin:.5rem 0;
+}
+.agent-status-warn {
+  background:#fff8e6;
+  color:#6d4b00;
+  border:1px solid #edd187;
+  border-radius:10px;
+  padding:.55rem .75rem;
+  font-size:.84rem;
+  margin:.5rem 0;
+}
+.agent-status-error {
+  background:#fff1f1;
+  color:#8a1f1f;
+  border:1px solid #efb8b8;
+  border-radius:10px;
+  padding:.55rem .75rem;
+  font-size:.84rem;
+  margin:.5rem 0;
+}
+.agent-mini-stepper {
+  display:flex;
+  gap:8px;
+  align-items:center;
+  margin-bottom:.85rem;
+  flex-wrap:wrap;
+}
+.agent-step-pill {
+  border-radius:999px;
+  padding:.25rem .62rem;
+  font-size:.72rem;
+  font-weight:800;
+  background:#d4ddd6;
+  color:#526356;
+}
+.agent-step-pill.active {
+  background:var(--green);
+  color:white;
+}
+.agent-step-pill.done {
+  background:var(--gold);
+  color:white;
+}
+.doctor-edit-panel {
+  background:white;
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:1rem 1.15rem;
+  box-shadow:0 6px 18px rgba(0,0,0,.04);
+}
+.agent-arrow {
+  text-align:center;
+  color:var(--green);
+  font-size:1.55rem;
+  font-weight:900;
+  margin:.35rem 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # =============================================================================
 # Header
 # =============================================================================
@@ -255,6 +405,14 @@ GDRIVE_EMBEDDINGS_ID = "1CxCGihYnqyaIc-F0IJwHNUTpLRHGmy8Y"
 GDRIVE_FAISS_ID      = "17F5rDFoT3iDbRKKiHCMiSB9ZrH0ecVTP"
 GDRIVE_METADATA_ID   = "1nUUdhivH1XIPGXkvWjrapxzuKfbM445B"
 GDRIVE_EXCEL_ID      = "1h54uBVeae8r6xC0MJI1-G3uRJwLc7K-y"
+
+# Optional local TABB file. In Streamlit Cloud, place tabb_rules.csv beside this app file.
+TABB_RULES_CSV_PATHS = [
+    "tabb_rules.csv",
+    os.path.join(os.getcwd(), "tabb_rules.csv"),
+    "/mnt/data/tabb_rules.csv",
+]
+
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_hybrid_cache_v1")
 EMBED_MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
@@ -2193,6 +2351,15 @@ defaults = {
     "df_metadata": None,
     "faiss_index": None,
     "bm25_index": None,
+
+    # Sequential LLM agent workflow state
+    "agent_step": 1,
+    "agent1_result": None,
+    "agent2_result": None,
+    "agent3_result": None,
+    "agent1_done": False,
+    "agent2_done": False,
+    "agent3_done": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -2740,6 +2907,714 @@ def quality_from_sp_and_validation(coded_causes: List[Dict], validation: Dict, s
         return "Needs Review"
     return "Excellent"
 
+
+# =============================================================================
+# Three LLM Agent Workflow + TABB support
+# =============================================================================
+AGENT1_SYSTEM_PROMPT = """
+You are Agent 1: Input Validation Agent for an electronic death certificate.
+
+Task:
+Review the doctor's structured Part I and Part II entries before ICD coding.
+
+Strict rules:
+- Use only the provided certificate fields.
+- Do not assign ICD codes.
+- Do not add new diseases.
+- Identify form and clinical-entry problems that should be fixed before retrieval.
+- Return concise doctor-facing guidance.
+- Return only valid JSON.
+
+Return JSON exactly:
+{
+  "status": "pass|warning|block",
+  "summary": "short doctor-facing summary",
+  "issues": [
+    {"line": "string", "severity": "error|warning|info", "message": "string"}
+  ],
+  "condition_to_continue": "string"
+}
+"""
+
+AGENT2_SYSTEM_PROMPT = """
+You are Agent 2: ICD Candidate Validation Agent for an electronic death certificate.
+
+Task:
+Review ICD-10 candidate retrieval and selected ICD codes.
+
+Strict rules:
+- The Excel/metadata ICD rows are the only coding source of truth.
+- Do not invent ICD codes.
+- Do not suggest codes that are not listed in the retrieved candidates.
+- Review whether the selected code is plausible for the doctor's cause text.
+- Review AcceptableMain, gender restrictions, vague/R-code issues, and manual-review flags.
+- Return concise doctor-facing guidance.
+- Return only valid JSON.
+
+Return JSON exactly:
+{
+  "status": "pass|warning|block",
+  "summary": "short summary",
+  "issues": [
+    {"line": "string", "severity": "error|warning|info", "message": "string"}
+  ],
+  "condition_to_continue": "string"
+}
+"""
+
+AGENT3_SYSTEM_PROMPT = """
+You are Agent 3: Mortality Sequence / WHO Rules Agent for an electronic death certificate.
+
+Task:
+Review the final Part I causal sequence, SP1-SP8 starting-point logic, TABB rule matches, and the UCOD decision.
+
+Strict rules:
+- Use only certificate causes and ICD codes already selected.
+- Do not invent diseases or ICD codes.
+- Explain whether the selected starting point / UCOD is acceptable.
+- If TABB or SP logic indicates uncertainty, require manual review.
+- Return concise doctor-facing guidance.
+- Return only valid JSON.
+
+Return JSON exactly:
+{
+  "status": "pass|warning|block",
+  "summary": "short summary",
+  "issues": [
+    {"line": "string", "severity": "error|warning|info", "message": "string"}
+  ],
+  "condition_to_continue": "string"
+}
+"""
+
+def reset_agent_workflow(clear_codes: bool = True) -> None:
+    """Reset the sequential agent workflow after doctor edits."""
+    for key in [
+        "agent_step",
+        "agent1_result",
+        "agent2_result",
+        "agent3_result",
+        "agent1_done",
+        "agent2_done",
+        "agent3_done",
+    ]:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.session_state.agent_step = 1
+    if clear_codes:
+        st.session_state.icd_results = None
+        for k in list(st.session_state.keys()):
+            if str(k).startswith("code_edit_"):
+                del st.session_state[k]
+
+def build_structured_cod_from_form_state(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
+    """Read the editable doctor fields from session_state/form_data."""
+    part1_defs_local = [
+        ("a", "immediate"),
+        ("b", "contributing"),
+        ("c", "contributing"),
+        ("d", "underlying"),
+    ]
+    part1_chain = []
+    for letter, role in part1_defs_local:
+        cause_raw = st.session_state.get(f"agent_part1_{letter}_cause", fd.get(f"part1_{letter}_cause", ""))
+        interval_raw = st.session_state.get(f"agent_part1_{letter}_interval", fd.get(f"part1_{letter}_interval", ""))
+        cause = clean_cause_input(cause_raw)
+        if cause:
+            part1_chain.append({
+                "line": letter,
+                "cause": cause,
+                "interval": str(interval_raw or "").strip() or "—",
+                "role": role,
+            })
+
+    part2_conditions = []
+    for i in range(1, 4):
+        cause_raw = st.session_state.get(f"agent_part2_{i}_cause", fd.get(f"part2_{i}_cause", ""))
+        interval_raw = st.session_state.get(f"agent_part2_{i}_interval", fd.get(f"part2_{i}_interval", ""))
+        cause = clean_cause_input(cause_raw)
+        if cause:
+            part2_conditions.append({
+                "line": f"II-{i}",
+                "cause": cause,
+                "interval": str(interval_raw or "").strip() or "—",
+                "role": "other",
+            })
+    return part1_chain, part2_conditions
+
+def save_agent_cod_to_form_data(fd: Dict, part1_chain: List[Dict], part2_conditions: List[Dict]) -> None:
+    """Persist edited doctor fields back into form_data."""
+    for letter in ["a", "b", "c", "d"]:
+        fd[f"part1_{letter}_cause"] = ""
+        fd[f"part1_{letter}_interval"] = ""
+    for i in range(1, 4):
+        fd[f"part2_{i}_cause"] = ""
+        fd[f"part2_{i}_interval"] = ""
+
+    for x in part1_chain:
+        line = str(x.get("line", "")).lower()
+        fd[f"part1_{line}_cause"] = x.get("cause", "")
+        fd[f"part1_{line}_interval"] = x.get("interval", "—")
+
+    for x in part2_conditions:
+        idx = str(x.get("line", "")).replace("II-", "")
+        fd[f"part2_{idx}_cause"] = x.get("cause", "")
+        fd[f"part2_{idx}_interval"] = x.get("interval", "—")
+
+    narrative_parts = []
+    if part1_chain:
+        narrative_parts.append(" due to ".join([f"{x['cause']} ({x.get('interval','—')})" for x in part1_chain]))
+    if part2_conditions:
+        narrative_parts.append("Other significant conditions included " + ", ".join([f"{x['cause']} ({x.get('interval','—')})" for x in part2_conditions]))
+
+    fd["manual_part1_chain"] = part1_chain
+    fd["manual_part2_conditions"] = part2_conditions
+    fd["free_text"] = ". ".join(narrative_parts) + "." if narrative_parts else ""
+    st.session_state.form_data.update(fd)
+
+@st.cache_resource(show_spinner=False)
+def load_tabb_rules() -> pd.DataFrame:
+    """Load local TABB CSV if available. Returns an empty table when unavailable."""
+    for path in TABB_RULES_CSV_PATHS:
+        try:
+            if path and os.path.exists(path):
+                df = pd.read_csv(path).fillna("")
+                expected = ["anchor", "rule_type", "modifier", "source_start", "source_end", "target", "raw_body", "page"]
+                for col in expected:
+                    if col not in df.columns:
+                        df[col] = ""
+                df["anchor_norm"] = df["anchor"].apply(normalize_icd_for_tabb)
+                df["source_start_norm"] = df["source_start"].apply(normalize_icd_for_tabb)
+                df["source_end_norm"] = df["source_end"].apply(normalize_icd_for_tabb)
+                df["target_norm"] = df["target"].apply(normalize_icd_for_tabb)
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame(columns=[
+        "anchor", "rule_type", "modifier", "source_start", "source_end", "target",
+        "raw_body", "page", "anchor_norm", "source_start_norm", "source_end_norm", "target_norm"
+    ])
+
+def normalize_icd_for_tabb(code: str) -> str:
+    """Normalize ICD code for TABB comparison: R57.2 -> R572."""
+    return re.sub(r"[^A-Z0-9]", "", str(code or "").upper().strip())
+
+def icd_sort_key_for_tabb(code: str) -> Tuple[str, int, str]:
+    c = normalize_icd_for_tabb(code)
+    if len(c) < 3:
+        return ("", -1, "")
+    letter = c[0]
+    try:
+        category = int(c[1:3])
+    except Exception:
+        category = -1
+    suffix = c[3:]
+    return (letter, category, suffix)
+
+def code_in_tabb_range(code: str, start: str, end: str) -> bool:
+    """Check if normalized ICD code is inside a TABB code/range."""
+    c = normalize_icd_for_tabb(code)
+    s = normalize_icd_for_tabb(start)
+    e = normalize_icd_for_tabb(end) or s
+    if not c or not s:
+        return False
+
+    if s == e:
+        # A three-character category such as B24 should match B24 and B24 subcodes.
+        if len(s) == 3:
+            return c[:3] == s
+        return c == s
+
+    sk = icd_sort_key_for_tabb(s)
+    ck = icd_sort_key_for_tabb(c)
+    ek = icd_sort_key_for_tabb(e)
+    if sk[0] != ck[0] or ek[0] != ck[0]:
+        return False
+
+    # For category range checks, tuple comparison is sufficient after normalization.
+    return sk <= ck <= ek
+
+def query_tabb(tabb_df: pd.DataFrame, anchor_code: str, other_code: str, max_matches: int = 8) -> List[Dict]:
+    """Return TABB rules where anchor_code is the rule anchor and other_code is in source range."""
+    if tabb_df is None or tabb_df.empty:
+        return []
+    anchor = normalize_icd_for_tabb(anchor_code)
+    other = normalize_icd_for_tabb(other_code)
+    if not anchor or not other:
+        return []
+
+    rules = tabb_df[tabb_df["anchor_norm"] == anchor]
+    # Fallback to category-level anchor if the exact subcode does not exist.
+    if rules.empty and len(anchor) > 3:
+        rules = tabb_df[tabb_df["anchor_norm"] == anchor[:3]]
+
+    matches = []
+    for _, row in rules.iterrows():
+        if code_in_tabb_range(other, row.get("source_start_norm", ""), row.get("source_end_norm", "")):
+            matches.append({
+                "anchor": str(row.get("anchor", "")),
+                "anchor_checked": anchor_code,
+                "other_checked": other_code,
+                "rule_type": str(row.get("rule_type", "")),
+                "modifier": str(row.get("modifier", "")),
+                "source_start": str(row.get("source_start", "")),
+                "source_end": str(row.get("source_end", "")),
+                "target": str(row.get("target", "")),
+                "raw_body": str(row.get("raw_body", "")),
+                "page": str(row.get("page", "")),
+                "direction": "anchor_to_other",
+            })
+            if len(matches) >= max_matches:
+                break
+    return matches
+
+def tabb_rule_message(match: Dict) -> str:
+    rt = str(match.get("rule_type", "")).upper()
+    anchor = match.get("anchor_checked", "")
+    other = match.get("other_checked", "")
+    target = match.get("target", "")
+    meanings = {
+        "DS": "Direct sequel rule",
+        "DSC": "Direct sequel combination",
+        "LMP": "Linkage with mention preference",
+        "LMC": "Linkage with mention combination",
+        "SMP": "Specificity preference",
+        "SMC": "Specificity combination",
+        "SDC": "Specificity due-to combination",
+        "TRIV": "Trivial condition rule",
+    }
+    base = meanings.get(rt, f"TABB rule {rt}")
+    if target:
+        return f"{base}: {anchor} with {other} points to target {target}."
+    return f"{base}: relationship found between {anchor} and {other}."
+
+def run_tabb_certificate_check(tabb_df: pd.DataFrame, coded_causes: List[Dict], sp_review: Dict, validation: Dict) -> Dict:
+    """Check selected UCOD/start point against other selected ICD codes using TABB."""
+    selected_code = (
+        sp_review.get("selected_code")
+        or validation.get("underlying_cause")
+        or ""
+    )
+    selected_code = str(selected_code or "").strip()
+    matches = []
+    reverse_matches = []
+
+    if not selected_code:
+        return {
+            "available": bool(tabb_df is not None and not tabb_df.empty),
+            "selected_code": "",
+            "matches": [],
+            "reverse_matches": [],
+            "needs_manual_review": True,
+            "summary": "No selected starting-point ICD code was available for TABB checking.",
+        }
+
+    if tabb_df is None or tabb_df.empty:
+        return {
+            "available": False,
+            "selected_code": selected_code,
+            "matches": [],
+            "reverse_matches": [],
+            "needs_manual_review": False,
+            "summary": "TABB CSV was not found. SP review was applied without TABB table confirmation.",
+        }
+
+    for item in coded_causes:
+        code = str(item.get("code_formatted", "") or "").strip()
+        if not code or normalize_icd_for_tabb(code) == normalize_icd_for_tabb(selected_code):
+            continue
+        direct = query_tabb(tabb_df, selected_code, code)
+        for m in direct:
+            m["other_line"] = item.get("line", "")
+            m["other_cause"] = item.get("cause", "")
+            matches.append(m)
+        reverse = query_tabb(tabb_df, code, selected_code)
+        for m in reverse:
+            m["other_line"] = item.get("line", "")
+            m["other_cause"] = item.get("cause", "")
+            m["direction"] = "other_to_selected"
+            reverse_matches.append(m)
+
+    important_rule_types = {"DS", "DSC", "LMP", "LMC", "SMP", "SMC", "SDC", "TRIV"}
+    needs_review = any(str(m.get("rule_type", "")).upper() in important_rule_types for m in matches + reverse_matches)
+
+    if matches or reverse_matches:
+        messages = [tabb_rule_message(m) for m in (matches + reverse_matches)[:5]]
+        summary = "TABB match detected: " + " ".join(messages)
+    else:
+        summary = "No TABB rule matched the selected starting point against the other certificate codes."
+
+    return {
+        "available": True,
+        "selected_code": selected_code,
+        "matches": matches[:12],
+        "reverse_matches": reverse_matches[:12],
+        "needs_manual_review": needs_review,
+        "summary": summary,
+    }
+
+def apply_tabb_result_to_validation(validation: Dict, tabb_result: Dict) -> Dict:
+    out = dict(validation)
+    issues = list(out.get("coding_issues", []) or [])
+    if tabb_result.get("available") and (tabb_result.get("matches") or tabb_result.get("reverse_matches")):
+        for m in (tabb_result.get("matches", []) + tabb_result.get("reverse_matches", []))[:5]:
+            msg = "TABB: " + tabb_rule_message(m)
+            if msg not in issues:
+                issues.append(msg)
+    elif not tabb_result.get("available"):
+        msg = "TABB rules CSV was not available; mortality sequence was checked using SP logic only."
+        if msg not in issues:
+            issues.append(msg)
+
+    out["coding_issues"] = issues
+    out["tabb_result"] = tabb_result
+    if tabb_result.get("needs_manual_review"):
+        out["overall_quality"] = "Needs Review"
+    return out
+
+def agent1_input_validation_with_llm(api_key: str, part1_chain: List[Dict], part2_conditions: List[Dict]) -> Dict:
+    precheck = pre_validate_structured_cod(part1_chain, part2_conditions)
+    cross_issues = add_cross_field_cod_issues(precheck.get("part1_chain", []), precheck.get("part2_conditions", []))
+    sequence_screen = live_sequence_screen(precheck.get("part1_chain", []))
+    sequence_issues = []
+    if sequence_screen.get("valid") is False:
+        problem_line = sequence_screen.get("problem_line") or "Part I"
+        sequence_issues.append({
+            "severity": "warning",
+            "line": f"Part I ({problem_line})",
+            "type": "sequence_not_confirmed",
+            "message": sequence_screen.get("message", "The causal sequence needs review."),
+            "blocking": False,
+        })
+
+    rule_issues = list(precheck.get("issues", [])) + cross_issues + sequence_issues
+    blocking = any(x.get("severity") == "error" or x.get("blocking") for x in rule_issues)
+    fallback = {
+        "status": "block" if blocking else ("warning" if rule_issues else "pass"),
+        "summary": "Input validation completed.",
+        "issues": [
+            {
+                "line": str(i.get("line", "")),
+                "severity": str(i.get("severity", "warning")),
+                "message": str(i.get("message", "")),
+            }
+            for i in rule_issues
+        ],
+        "condition_to_continue": "Fix blocking errors before retrieval." if blocking else "Doctor may continue to ICD retrieval.",
+    }
+
+    payload = {
+        "part1_chain": part1_chain,
+        "part2_conditions": part2_conditions,
+        "rule_based_issues": fallback["issues"],
+        "sequence_screen": sequence_screen,
+        "instruction": "Explain the validation result. Do not add diseases or ICD codes.",
+    }
+    llm = call_claude_json(api_key, AGENT1_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=700, fallback=fallback)
+    if not isinstance(llm, dict):
+        llm = fallback
+
+    # Deterministic rule status is authoritative.
+    llm["status"] = fallback["status"]
+    llm["blocking"] = blocking
+    llm["rule_issues"] = rule_issues
+    llm["precheck"] = precheck
+    llm["condition_to_continue"] = fallback["condition_to_continue"]
+    return llm
+
+def agent2_rule_issues(coded_causes: List[Dict], sex_value: str) -> List[Dict]:
+    issues = []
+    for item in coded_causes:
+        line = str(item.get("line", ""))
+        cause = str(item.get("cause", ""))
+        code = str(item.get("code_formatted", ""))
+        if not code:
+            issues.append({"line": line, "severity": "error", "message": f"No ICD code was selected for {cause}."})
+        if item.get("selection_status") == "manual_review":
+            issues.append({"line": line, "severity": "warning", "message": f"{cause} requires manual review."})
+        if acceptable_main_bool(item.get("acceptable_main", "")) is False and item.get("role") in {"immediate", "contributing", "underlying"}:
+            issues.append({"line": line, "severity": "warning", "message": f"{code} is not acceptable as a main cause."})
+        if not is_gender_allowed(item.get("gender_restriction", ""), sex_value):
+            issues.append({"line": line, "severity": "error", "message": f"{code} conflicts with the patient sex."})
+        if is_excel_ill_defined(item):
+            issues.append({"line": line, "severity": "warning", "message": f"{code} may be ill-defined or vague."})
+        if is_excel_unlikely_to_cause_death(item):
+            issues.append({"line": line, "severity": "warning", "message": f"{code} may be unlikely to cause death by itself."})
+    return issues
+
+def agent2_candidate_validation_with_llm(api_key: str, coded_results: Dict, patient_info: Dict) -> Dict:
+    coded_causes = coded_results.get("coded_causes", []) or []
+    issues = agent2_rule_issues(coded_causes, patient_info.get("sex", ""))
+    has_error = any(i.get("severity") == "error" for i in issues)
+    status = "block" if has_error else ("warning" if issues else "pass")
+
+    compact = []
+    for item in coded_causes:
+        compact.append({
+            "line": item.get("line", ""),
+            "role": item.get("role", ""),
+            "cause": item.get("cause", ""),
+            "selected_code": item.get("code_formatted", ""),
+            "short_desc": item.get("short_desc", ""),
+            "acceptable_main": item.get("acceptable_main", ""),
+            "gender_restriction": item.get("gender_restriction", ""),
+            "selection_status": item.get("selection_status", ""),
+            "selection_notes": item.get("selection_notes", ""),
+            "top_candidates": [
+                {
+                    "code": c.get("code_formatted", ""),
+                    "short_desc": c.get("short_desc", ""),
+                    "acceptable_main": c.get("acceptable_main", ""),
+                    "score": c.get("score", 0),
+                }
+                for c in item.get("candidates", [])[:5]
+            ],
+        })
+
+    fallback = {
+        "status": status,
+        "summary": "ICD retrieval and candidate validation completed.",
+        "issues": issues,
+        "condition_to_continue": "Resolve missing-code errors before mortality sequence review." if has_error else "Doctor may continue to WHO/TABB sequence review.",
+    }
+
+    payload = {
+        "patient_info": patient_info,
+        "coded_causes_and_candidates": compact,
+        "rule_based_issues": issues,
+        "instruction": "Review selected ICD codes. Do not invent codes. Only discuss retrieved candidates and selected Excel rows.",
+    }
+    llm = call_claude_json(api_key, AGENT2_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=900, fallback=fallback)
+    if not isinstance(llm, dict):
+        llm = fallback
+
+    llm["status"] = status
+    llm["blocking"] = has_error
+    llm["rule_issues"] = issues
+    llm["condition_to_continue"] = fallback["condition_to_continue"]
+    return llm
+
+def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame) -> Dict:
+    concepts = coded_results.get("concepts", {}) or {}
+    coded_causes = coded_results.get("coded_causes", []) or []
+    validation = coded_results.get("validation", {}) or {}
+
+    sp_review = apply_sp_engine(api_key, concepts, coded_causes)
+    validation = apply_sp_result_to_validation(validation, sp_review, coded_causes)
+    validation["overall_quality"] = quality_from_sp_and_validation(coded_causes, validation, sp_review)
+
+    tabb_result = run_tabb_certificate_check(tabb_df, coded_causes, sp_review, validation)
+    validation = apply_tabb_result_to_validation(validation, tabb_result)
+
+    if sp_review.get("needs_manual_review") or sp_review.get("sp_rule") in {"REVIEW", "SP5", "SP7", "SP8"}:
+        validation["overall_quality"] = "Needs Review"
+    if tabb_result.get("needs_manual_review"):
+        validation["overall_quality"] = "Needs Review"
+
+    rule_issues = []
+    for warning in sp_review.get("warnings", []) or []:
+        rule_issues.append({"line": sp_review.get("selected_line", ""), "severity": "warning", "message": str(warning)})
+    if tabb_result.get("needs_manual_review"):
+        rule_issues.append({"line": sp_review.get("selected_line", ""), "severity": "warning", "message": tabb_result.get("summary", "")})
+    if validation.get("coding_issues"):
+        for i in validation.get("coding_issues", [])[:8]:
+            rule_issues.append({"line": "Final", "severity": "warning", "message": str(i)})
+
+    status = "warning" if validation.get("overall_quality") == "Needs Review" else "pass"
+
+    fallback = {
+        "status": status,
+        "summary": f"Mortality sequence review completed. Final quality: {validation.get('overall_quality', 'Needs Review')}.",
+        "issues": rule_issues,
+        "condition_to_continue": "Manual review is required before final submission." if status != "pass" else "Certificate can continue to final preview.",
+    }
+
+    payload = {
+        "part1_chain": concepts.get("part1_chain", []),
+        "part2_conditions": concepts.get("part2_conditions", []),
+        "coded_causes": [
+            {
+                "line": x.get("line", ""),
+                "role": x.get("role", ""),
+                "cause": x.get("cause", ""),
+                "code": x.get("code_formatted", ""),
+                "short_desc": x.get("short_desc", ""),
+                "acceptable_main": x.get("acceptable_main", ""),
+            }
+            for x in coded_causes
+        ],
+        "sp_review": sp_review,
+        "tabb_result": tabb_result,
+        "validation": validation,
+        "instruction": "Explain the SP/TABB result. Do not invent causes or ICD codes.",
+    }
+    llm = call_claude_json(api_key, AGENT3_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=1000, fallback=fallback)
+    if not isinstance(llm, dict):
+        llm = fallback
+
+    llm["status"] = status
+    llm["blocking"] = False
+    llm["rule_issues"] = rule_issues
+    llm["sp_review"] = sp_review
+    llm["tabb_result"] = tabb_result
+    llm["validation"] = validation
+    llm["condition_to_continue"] = fallback["condition_to_continue"]
+
+    coded_results["validation"] = validation
+    return llm
+
+def agent_status_class(status: str) -> str:
+    if status == "pass":
+        return "agent-status-pass"
+    if status == "block":
+        return "agent-status-error"
+    return "agent-status-warn"
+
+def render_agent_stepper(current_step: int) -> None:
+    labels = [
+        (1, "Input"),
+        (2, "Retrieval"),
+        (3, "WHO/TABB"),
+    ]
+    html_pills = []
+    for num, label in labels:
+        cls = "agent-step-pill active" if num == current_step else ("agent-step-pill done" if num < current_step else "agent-step-pill")
+        html_pills.append(f'<span class="{cls}">Agent {num}: {escape(label)}</span>')
+        if num < 3:
+            html_pills.append('<span style="color:#7b8d80;font-weight:900">→</span>')
+    st.markdown('<div class="agent-mini-stepper">' + "".join(html_pills) + '</div>', unsafe_allow_html=True)
+
+def render_agent_card_header(step: int, title: str, subtitle: str, state: str = "active") -> None:
+    state_class = "active" if state == "active" else ("done" if state == "done" else "blocked")
+    st.markdown(
+        f"""
+        <div class="agent-card {state_class}">
+          <div class="agent-kicker">AGENT {step}</div>
+          <div class="agent-title">{escape(title)}</div>
+          <div class="agent-subtitle">{escape(subtitle)}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def close_agent_card() -> None:
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def render_agent_result(result: Dict) -> None:
+    if not result:
+        return
+    status = result.get("status", "warning")
+    st.markdown(
+        f'<div class="{agent_status_class(status)}"><b>Status:</b> {escape(status.upper())}<br>{escape(result.get("summary", ""))}</div>',
+        unsafe_allow_html=True,
+    )
+    issues = result.get("issues", []) or result.get("rule_issues", []) or []
+    if issues:
+        st.markdown('<div class="agent-checklist"><b>Findings</b><ul>', unsafe_allow_html=True)
+        for issue in issues[:10]:
+            if isinstance(issue, dict):
+                msg = f"{issue.get('line','')}: {issue.get('message','')}"
+            else:
+                msg = str(issue)
+            st.markdown(f"<li>{escape(msg)}</li>", unsafe_allow_html=True)
+        st.markdown("</ul></div>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="agent-condition"><b>Condition to continue:</b><br>{escape(result.get("condition_to_continue", ""))}</div>',
+        unsafe_allow_html=True,
+    )
+
+def render_agent_prompt_box(prompt_text: str) -> None:
+    with st.expander("Agent prompt"):
+        st.markdown(f'<div class="agent-prompt">{escape(prompt_text.strip())}</div>', unsafe_allow_html=True)
+
+def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
+    """Left-side editable doctor panel used on the agent workflow page."""
+    st.markdown('<div class="doctor-edit-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Doctor Editable Certificate Fields</div>', unsafe_allow_html=True)
+    st.caption("The doctor can modify these fields at any time. After changes, click Save Changes & Reset Agents.")
+
+    st.markdown("**Part I — Direct causal sequence**")
+    labels = {
+        "a": ("Immediate cause", "e.g., septic shock"),
+        "b": ("Due to / as a consequence of", "e.g., generalized peritonitis"),
+        "c": ("Due to / as a consequence of", "e.g., perforated sigmoid diverticulitis"),
+        "d": ("Due to / as a consequence of", "optional"),
+    }
+    for letter in ["a", "b", "c", "d"]:
+        c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
+        with c0:
+            st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#006940'>({letter})</div>", unsafe_allow_html=True)
+        st.session_state.setdefault(f"agent_part1_{letter}_cause", fd.get(f"part1_{letter}_cause", ""))
+        st.session_state.setdefault(f"agent_part1_{letter}_interval", fd.get(f"part1_{letter}_interval", ""))
+        with c1:
+            st.text_input(
+                labels[letter][0],
+                key=f"agent_part1_{letter}_cause",
+                placeholder=labels[letter][1],
+            )
+        with c2:
+            st.text_input(
+                "Interval",
+                key=f"agent_part1_{letter}_interval",
+                placeholder="e.g., 2 days",
+            )
+
+    st.markdown("---")
+    st.markdown("**Part II — Other significant conditions**")
+    for i in range(1, 4):
+        c0, c1, c2 = st.columns([0.08, 0.67, 0.25])
+        with c0:
+            st.markdown(f"<div style='padding-top:1.9rem;font-weight:800;color:#1a4a7a'>II-{i}</div>", unsafe_allow_html=True)
+        st.session_state.setdefault(f"agent_part2_{i}_cause", fd.get(f"part2_{i}_cause", ""))
+        st.session_state.setdefault(f"agent_part2_{i}_interval", fd.get(f"part2_{i}_interval", ""))
+        with c1:
+            st.text_input(
+                f"Other significant condition {i}",
+                key=f"agent_part2_{i}_cause",
+                placeholder="e.g., type 2 diabetes mellitus",
+            )
+        with c2:
+            st.text_input(
+                "Interval",
+                key=f"agent_part2_{i}_interval",
+                placeholder="e.g., 12 years",
+            )
+
+    part1_chain, part2_conditions = build_structured_cod_from_form_state(fd)
+
+    b_save, b_back = st.columns([1.4, 1])
+    with b_save:
+        if st.button("Save Changes & Reset Agents", type="primary", use_container_width=True):
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+            reset_agent_workflow(clear_codes=True)
+            st.success("Changes saved. Agent workflow reset to Agent 1.")
+            st.rerun()
+    with b_back:
+        if st.button("Back to Cause Page", use_container_width=True):
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+            st.session_state.icd_results = None
+            st.session_state.page = 3
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    return part1_chain, part2_conditions
+
+def render_compact_coded_causes(coded_causes: List[Dict]) -> None:
+    rows = []
+    for item in coded_causes:
+        rows.append({
+            "Line": item.get("line", ""),
+            "Role": item.get("role", ""),
+            "Cause": item.get("cause", ""),
+            "ICD-10": item.get("code_formatted", ""),
+            "Disease Name": item.get("short_desc", ""),
+            "Status": item.get("selection_status", ""),
+        })
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No coded causes yet.")
+
+
 # =============================================================================
 # PAGE 1
 # =============================================================================
@@ -3040,7 +3915,7 @@ elif st.session_state.page == 3:
                 st.rerun()
 
 # =============================================================================
-# PAGE 4
+# PAGE 4 — Sequential LLM Agent Workflow
 # =============================================================================
 elif st.session_state.page == 4:
     render_steps(4)
@@ -3060,411 +3935,307 @@ elif st.session_state.page == 4:
         st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
         st.stop()
 
-    if not fd.get("manual_part1_chain") and not fd.get("free_text", "").strip():
-        st.error("No Part I cause sequence found.")
-        if st.button("Back"):
-            st.session_state.page = 3
-            st.rerun()
-        st.stop()
+    # If the case came from Page 3, initialize editable agent fields once.
+    if fd.get("manual_part1_chain"):
+        for x in fd.get("manual_part1_chain", []):
+            line = str(x.get("line", "")).lower()
+            st.session_state.setdefault(f"agent_part1_{line}_cause", x.get("cause", ""))
+            st.session_state.setdefault(f"agent_part1_{line}_interval", x.get("interval", "—"))
+    if fd.get("manual_part2_conditions"):
+        for x in fd.get("manual_part2_conditions", []):
+            idx = str(x.get("line", "")).replace("II-", "")
+            st.session_state.setdefault(f"agent_part2_{idx}_cause", x.get("cause", ""))
+            st.session_state.setdefault(f"agent_part2_{idx}_interval", x.get("interval", "—"))
 
-    if st.session_state.icd_results is None:
-        patient_info = {
-            "age_years": fd.get("age_years", 0),
-            "sex": fd.get("sex", ""),
-            "death_type": fd.get("death_type", ""),
-            "chronic_conditions": fd.get("chronic_conditions", []),
-        }
+    if "agent_step" not in st.session_state:
+        st.session_state.agent_step = 1
 
-        with st.spinner("Coding structured cause sequence from Excel candidates..."):
-            try:
-                if fd.get("manual_part1_chain"):
-                    extracted = {
-                        "part1_chain": fd.get("manual_part1_chain", []),
-                        "part2_conditions": fd.get("manual_part2_conditions", []),
-                    }
-                    st.session_state.icd_results = code_extracted_causes_with_claude(
-                        api_key=API_KEY,
-                        extracted=extracted,
-                        df_source=df_source,
-                        faiss_index=faiss_index,
-                        bm25=bm25,
-                        patient_info=patient_info,
-                    )
-                else:
-                    st.session_state.icd_results = code_causes_hybrid_with_claude(
-                        api_key=API_KEY,
-                        narrative=fd["free_text"],
-                        df_source=df_source,
-                        faiss_index=faiss_index,
-                        bm25=bm25,
-                        patient_info=patient_info,
-                    )
-            except Exception as e:
-                st.session_state.icd_results = {
-                    "concepts": {"part1_chain": [], "part2_conditions": []},
-                    "coded_causes": [],
-                    "validation": {
-                        "underlying_cause": "",
-                        "coding_issues": [f"System error during coding: {type(e).__name__}: {e}"],
-                        "who_notes": "",
-                        "overall_quality": "Needs Review",
-                    },
-                }
-                st.error(f"System error during coding: {type(e).__name__}: {e}")
+    st.markdown('<div class="section-title">Review & Coding — Sequential LLM Agents</div>', unsafe_allow_html=True)
+    st.caption("The doctor edits the certificate on the left. The right side shows one LLM agent at a time.")
 
-    results = st.session_state.icd_results
-    coded_causes = results["coded_causes"]
-    concepts = results["concepts"]
-    validation = results["validation"]
+    left, right = st.columns([1.35, 1.0], gap="large")
 
-    # Apply SP1-SP8 only on the Review & Coding page.
-    # The Cause of Death page performs structure validation only and never assumes SP3.
-    if "sp_review" not in validation:
-        with st.spinner("Reviewing SP1-SP8 starting point logic..."):
-            sp_review = apply_sp_engine(API_KEY, concepts, coded_causes)
-        validation = apply_sp_result_to_validation(validation, sp_review, coded_causes)
-        validation["overall_quality"] = quality_from_sp_and_validation(coded_causes, validation, sp_review)
-        st.session_state.icd_results["validation"] = validation
+    with left:
+        part1_chain, part2_conditions = render_doctor_edit_panel(fd)
 
-    sp_review = validation.get("sp_review", {})
-    quality = validation.get("overall_quality", "")
-    q_color = {"Excellent": "#006940", "Good": "#2d7a4f", "Needs Review": "#c0392b"}.get(quality, "#888")
+    patient_info = {
+        "age_years": fd.get("age_years", 0),
+        "sex": fd.get("sex", ""),
+        "death_type": fd.get("death_type", ""),
+        "chronic_conditions": fd.get("chronic_conditions", []),
+    }
 
-    if quality:
-        underlying = validation.get("underlying_cause", "—")
-        underlying_text = validation.get("underlying_cause_text", "")
-        issues = validation.get("coding_issues", [])
-        who_notes = validation.get("who_notes", "")
+    with right:
+        st.markdown('<div class="agent-workspace-title">Agent Workspace</div>', unsafe_allow_html=True)
+        render_agent_stepper(int(st.session_state.get("agent_step", 1)))
 
-        issues_html = "".join(
-            f'<li style="color:#c0392b;font-size:.83rem">{escape(i)}</li>' for i in issues
-        ) if issues else '<li style="color:#006940;font-size:.83rem">No issues detected.</li>'
-
-        st.markdown(
-            '<div style="background:white;border:2px solid ' + q_color + ';border-radius:8px;'
-            'padding:1rem 1.2rem;margin-bottom:1.2rem">'
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem;gap:12px;flex-wrap:wrap">'
-            '<b style="color:' + q_color + ';font-size:.95rem">Validation Result — ' + escape(quality) + '</b>'
-            '<span style="background:' + q_color + ';color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">'
-            'Starting point: ' + escape(underlying_text or "Not confirmed") + ' | ICD: ' + escape(underlying or "—") + '</span></div>'
-            '<ul style="margin:.3rem 0 .3rem 1rem">' + issues_html + '</ul>'
-            + ('<div style="font-size:.82rem;color:#444;margin-top:.4rem">' + escape(who_notes) + '</div>' if who_notes else '')
-            + '</div>',
-            unsafe_allow_html=True,
-        )
-
-    # Doctor-facing SP rule summary
-    if sp_review:
-        sp_rule = sp_review.get("sp_rule", "REVIEW")
-        selected_cause = sp_review.get("selected_cause", "") or "Not confirmed"
-        selected_line = sp_review.get("selected_line", "") or "—"
-        selected_code = sp_review.get("selected_code", "") or validation.get("underlying_cause", "") or "Pending ICD review"
-        sp_color = "#006940" if sp_rule in {"SP1", "SP2", "SP3", "SP4", "SP6"} and not sp_review.get("needs_manual_review") else "#c27c00"
-        warnings_html = "".join(f'<li>{escape(w)}</li>' for w in sp_review.get("warnings", []) or [])
-        if not warnings_html:
-            warnings_html = '<li>No SP-specific warnings.</li>'
-        st.markdown(
-            '<div style="background:white;border:1px solid #d7e6db;border-left:4px solid ' + sp_color + ';border-radius:8px;padding:1rem 1.2rem;margin-bottom:1rem">'
-            '<div style="font-weight:800;color:' + sp_color + ';font-size:.95rem;margin-bottom:.35rem">Starting Point Review — ' + escape(sp_rule) + '</div>'
-            '<div style="font-size:.86rem;color:#1a2e1a"><b>Selected starting point:</b> ' + escape(selected_cause) + ' <span style="color:#667">(line ' + escape(selected_line) + ')</span></div>'
-            '<div style="font-size:.86rem;color:#1a2e1a"><b>Selected ICD code:</b> ' + escape(selected_code) + '</div>'
-            '<div style="font-size:.82rem;color:#444;margin-top:.45rem">' + escape(sp_review.get("explanation", "")) + '</div>'
-            '<ul style="font-size:.8rem;color:#7a5200;margin:.45rem 0 0 1rem">' + warnings_html + '</ul>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    tab_res, tab_cert, tab_debug = st.tabs(["ICD-10 Codes", "Certificate Preview", "Extracted Structure"])
-
-    with tab_res:
-        role_hdr = {"immediate": "#006940", "contributing": "#2d7a4f", "other": "#5a7060"}
-
-        for idx, item in enumerate(coded_causes):
-            acc = item.get("acceptable_main", "")
-            acc_bool = acceptable_main_bool(acc)
-            bg_acc = "#006940" if acc_bool is True else ("#c0392b" if acc_bool is False else "#888")
-            acc_en = (
-                "Acceptable as main cause" if acc_bool is True
-                else "Not acceptable as main cause" if acc_bool is False
-                else "Unknown acceptability"
+        # ------------------------------------------------------------------
+        # Agent 1: Input validation
+        # ------------------------------------------------------------------
+        if st.session_state.agent_step == 1:
+            render_agent_card_header(
+                1,
+                "Input Validation Agent",
+                "Checks Part I / Part II structure before retrieval: empty lines, skipped lines, multiple causes, duplicate causes, intervals, and sequence plausibility.",
+                state="active",
             )
-
-            rc = role_hdr.get(item["role"], "#555")
-            code_val = item.get("code_formatted", "")
-            short_val = item.get("short_desc", "")
-            long_val = item.get("long_desc", "")
-            notes_val = item.get("selection_notes", "")
-            source_note = item.get("note", "")
-            show_badge = item["role"] in {"immediate", "contributing", "underlying"}
-
-            badge_html = (
-                '<span style="background:' + bg_acc + ';color:white;border-radius:4px;'
-                'padding:3px 10px;font-size:.72rem;font-weight:700;display:inline-block;margin-top:4px">'
-                + escape(acc_en) + '</span>'
-            ) if show_badge else ""
-
             st.markdown(
-                '<div style="border:1.5px solid #c8dece;border-radius:8px;'
-                'margin-bottom:1.4rem;overflow:hidden">'
-                '<div style="background:' + rc + ';color:white;padding:.5rem 1rem;'
-                'font-size:.84rem;font-weight:700">'
-                + escape(item["label"]) + ' — ' + escape(item["cause"])
-                + ' <span style="opacity:.82;font-weight:400;font-size:.78rem"> | Interval: '
-                + escape(item["interval"]) + '</span></div>'
-                '<div style="display:grid;grid-template-columns:1fr 1.6fr 2.4fr 2.5fr;gap:0">'
-
-                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'
-                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em">ICD-10 Code</div>'
-                '<div style="font-size:1.05rem;font-weight:800;color:var(--green);letter-spacing:.03em">'
-                + (escape(code_val) if code_val else '<span style="color:#bbb;font-style:italic">—</span>')
-                + '</div>' + badge_html + '</div>'
-
-                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'
-                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em">Disease Name</div>'
-                '<div style="font-size:.85rem;color:#1a2e1a;line-height:1.45">'
-                + (escape(short_val) if short_val else '<span style="color:#bbb;font-style:italic">—</span>')
-                + '</div></div>'
-
-                '<div style="padding:.7rem .9rem;border-right:1px solid #e0ece5">'
-                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em">Full Description</div>'
-                '<div style="font-size:.82rem;color:#2a3a2a;line-height:1.5">'
-                + (escape(long_val) if long_val else '<span style="color:#bbb;font-style:italic">—</span>')
-                + '</div></div>'
-
-                '<div style="padding:.7rem .9rem;background:#f7faf8">'
-                '<div style="font-size:.72rem;font-weight:700;color:#555;margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em">Selection Notes</div>'
-                '<div style="font-size:.81rem;color:#1a2e1a;line-height:1.6;border:1px solid #d7e6db;border-radius:5px;padding:.4rem .6rem;background:white">'
-                + (escape(notes_val) if notes_val else '<span style="color:#bbb;font-style:italic">—</span>')
-                + '</div>'
-                + ('<div style="font-size:.76rem;color:#666;margin-top:.45rem"><b>ICD Note:</b> ' + escape(source_note) + '</div>' if source_note else '')
-                + '</div>'
-                '</div></div>',
+                """
+                <div class="agent-checklist">
+                <b>This agent validates:</b>
+                <ul>
+                  <li>Part I is not empty</li>
+                  <li>No skipped Part I lines</li>
+                  <li>One disease or condition per line</li>
+                  <li>Intervals are understandable</li>
+                  <li>No duplicated causal-chain entries</li>
+                </ul>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
-
-            widget_key = f"code_edit_{idx}"
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = code_val
-
-            new_code = st.text_input(
-                f"Edit ICD code for: {item['cause'][:50]}",
-                key=widget_key,
-                placeholder="e.g. I21.0",
+            st.markdown(
+                '<div class="agent-condition"><b>Condition to unlock Agent 2:</b><br>No blocking input/form errors.</div>',
+                unsafe_allow_html=True,
             )
+            render_agent_prompt_box(AGENT1_SYSTEM_PROMPT)
 
-            if new_code != code_val:
-                updated = refresh_code_from_manual_edit(df_source, item, new_code, fd.get("sex", ""))
-                st.session_state.icd_results["coded_causes"][idx] = updated
-                st.session_state.icd_results["validation"] = validate_certificate(
-                    st.session_state.icd_results["coded_causes"], fd.get("sex", "")
-                )
-                st.session_state.icd_results["validation"].pop("sp_review", None)
+            if st.button("Run Agent 1 — Validate Input", type="primary", use_container_width=True):
+                save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                with st.spinner("Agent 1 is reviewing the doctor input..."):
+                    st.session_state.agent1_result = agent1_input_validation_with_llm(
+                        API_KEY,
+                        part1_chain,
+                        part2_conditions,
+                    )
+                st.session_state.agent1_done = True
                 st.rerun()
 
-            with st.expander("Top retrieved candidates"):
-                cand_rows = []
-                for c in item.get("candidates", []):
-                    cand_rows.append({
-                        "Code": c.get("code_formatted", ""),
-                        "ShortDesc": c.get("short_desc", ""),
-                        "AcceptableMain": c.get("acceptable_main", ""),
-                        "GenderRestriction": c.get("gender_restriction", ""),
-                        "Score": round(float(c.get("score", 0.0)), 4),
-                        "Why": "; ".join(c.get("reasons", [])),
-                    })
-                if cand_rows:
-                    st.dataframe(pd.DataFrame(cand_rows), use_container_width=True)
-                else:
-                    st.info("No candidates available.")
+            render_agent_result(st.session_state.get("agent1_result"))
 
-    with tab_cert:
-        cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
-        cert_no_safe = sanitize_filename(cert_no)
+            can_go_next = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
+            if st.button("Next → Agent 2", use_container_width=True, disabled=not can_go_next):
+                st.session_state.agent_step = 2
+                st.rerun()
 
-        part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
-        part2 = [x for x in coded_causes if x["role"] == "other"]
+            close_agent_card()
 
-        row_labels = ["(a)", "(b)", "(c)", "(d)", "(e)"]
-        selected_line_for_cert = str(validation.get("starting_point_line", "") or validation.get("sp_review", {}).get("selected_line", "")).lower()
-        sp_rule_for_cert = str(validation.get("sp_rule", "") or validation.get("sp_review", {}).get("sp_rule", "REVIEW"))
-        part1_rows = ""
-        for i, x in enumerate(part1):
-            line_id = str(x.get("line", "")).lower()
-            is_starting_point = bool(selected_line_for_cert and line_id == selected_line_for_cert)
-            row_style = (
-                'background:#f0f4ff;border:1.5px solid #1a4a7a;border-radius:6px;padding:.45rem .55rem;margin:.35rem 0;'
-                if is_starting_point else
-                'border-bottom:1px solid #e8ede9;padding:.36rem 0;'
+        # ------------------------------------------------------------------
+        # Agent 2: ICD retrieval and candidate validation
+        # ------------------------------------------------------------------
+        elif st.session_state.agent_step == 2:
+            if not st.session_state.get("agent1_done"):
+                st.warning("Run Agent 1 first.")
+                if st.button("Back to Agent 1", use_container_width=True):
+                    st.session_state.agent_step = 1
+                    st.rerun()
+                st.stop()
+
+            render_agent_card_header(
+                2,
+                "ICD Candidate Validation Agent",
+                "Runs Excel-grounded retrieval and LLM code selection. The LLM can choose only from retrieved ICD file candidates.",
+                state="active",
             )
-            code_display = escape(x.get("code_formatted", "")) if x.get("code_formatted", "") else '<span style="color:#999">Pending ICD review</span>'
-            sp_badge = (
-                ' <span style="background:#1a4a7a;color:white;border-radius:4px;padding:2px 7px;font-size:.68rem;margin-left:6px">STARTING POINT</span>'
-                if is_starting_point else ''
+            st.markdown(
+                """
+                <div class="agent-checklist">
+                <b>This agent validates:</b>
+                <ul>
+                  <li>BM25 + FAISS candidate retrieval</li>
+                  <li>Selected code exists in the ICD Excel source</li>
+                  <li>Claude selected only from retrieved candidates</li>
+                  <li>AcceptableMain, gender restriction, vague/R-code flags</li>
+                  <li>Missing-code/manual-review conditions</li>
+                </ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            part1_rows += (
-                '<div class="cert-field" style="' + row_style + '"><span class="cert-label">'
-                + escape(row_labels[i] if i < len(row_labels) else f"({i+1})")
-                + (' Immediate cause' if i == 0 else ' Due to')
-                + sp_badge
-                + '</span><span>'
-                + escape(x["cause"]) + ' — <b>' + code_display + '</b>'
-                + ' <span style="font-size:.78rem;color:#666">(' + escape(x.get("interval", "—")) + ')</span>'
-                + '</span></div>'
+            st.markdown(
+                '<div class="agent-condition"><b>Condition to unlock Agent 3:</b><br>At least one ICD-coded Part I chain exists and no missing-code error is present.</div>',
+                unsafe_allow_html=True,
             )
+            render_agent_prompt_box(AGENT2_SYSTEM_PROMPT)
 
-        part2_rows = "".join(
-            '<div class="cert-field"><span class="cert-label">Other significant condition</span>'
-            '<span>' + escape(x["cause"]) + ' — <b>' + escape(x.get("code_formatted", "")) + '</b>'
-            + (' <span style="font-size:.78rem;color:#666">(' + escape(x.get("interval", "—")) + ')</span>' if x.get("interval", "—") != "—" else '')
-            + '</span></div>'
-            for x in part2
-        )
+            b_run, b_back = st.columns([1.4, 1])
+            with b_run:
+                if st.button("Run Agent 2 — Retrieve & Select ICD Codes", type="primary", use_container_width=True):
+                    save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                    extracted = {
+                        "part1_chain": part1_chain,
+                        "part2_conditions": part2_conditions,
+                    }
+                    with st.spinner("Agent 2 is retrieving ICD candidates and selecting file-only codes..."):
+                        coded_results = code_extracted_causes_with_claude(
+                            api_key=API_KEY,
+                            extracted=extracted,
+                            df_source=df_source,
+                            faiss_index=faiss_index,
+                            bm25=bm25,
+                            patient_info=patient_info,
+                        )
+                        st.session_state.icd_results = coded_results
+                        st.session_state.agent2_result = agent2_candidate_validation_with_llm(
+                            API_KEY,
+                            coded_results,
+                            patient_info,
+                        )
+                    st.session_state.agent2_done = True
+                    st.session_state.agent3_done = False
+                    st.session_state.agent3_result = None
+                    st.rerun()
+            with b_back:
+                if st.button("← Back to Agent 1", use_container_width=True):
+                    st.session_state.agent_step = 1
+                    st.rerun()
 
-        underlying_code = validation.get("underlying_cause", "—")
-        underlying_text = validation.get("underlying_cause_text", "")
+            render_agent_result(st.session_state.get("agent2_result"))
 
-        st.markdown(
-            '<div class="cert-preview">'
-            '<div style="display:flex;justify-content:space-between;align-items:center;'
-            'border-bottom:2px solid var(--green);padding-bottom:1rem;margin-bottom:1.4rem;gap:12px;flex-wrap:wrap">'
-            '<div>'
-            '<div style="font-size:.95rem;font-weight:700;color:var(--green)">Kingdom of Saudi Arabia</div>'
-            '<div style="font-size:.8rem;color:var(--muted)">Ministry of Health</div>'
-            '<div style="font-size:.75rem;color:#888">' + escape(hospital_name) + ' — ' + escape(hospital_city) + '</div></div>'
-            '<div style="text-align:center">'
-            '<div class="cert-title">Death Certificate</div>'
-            '<div class="cert-sub">Electronic ICD-10 Coding Preview</div>'
-            '<div style="background:var(--green);color:white;border-radius:4px;padding:2px 10px;'
-            'font-size:.76rem;margin-top:5px;display:inline-block">No: ' + escape(cert_no) + '</div></div>'
-            '<div style="text-align:right">'
-            '<div style="font-size:.95rem;font-weight:700;color:var(--green)">Saudi MOH</div>'
-            '<div style="font-size:.8rem;color:var(--muted)">Official Draft Preview</div></div></div>'
+            if st.session_state.get("icd_results"):
+                st.markdown("**Selected ICD codes**")
+                render_compact_coded_causes(st.session_state.icd_results.get("coded_causes", []))
 
-            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin-bottom:1.4rem">'
-            '<div>'
-            '<div class="cert-field"><span class="cert-label">Name</span><span>' + escape(fd.get("full_name", "—")) + '</span></div>'
-            '<div class="cert-field"><span class="cert-label">ID</span><span>' + escape(fd.get("national_id", "—")) + '</span></div>'
-            '<div class="cert-field"><span class="cert-label">Sex</span><span>' + escape(fd.get("sex", "—")) + '</span></div>'
-            '<div class="cert-field"><span class="cert-label">Age</span><span>' + escape(str(fd.get("age_years", "—"))) + ' years</span></div>'
-            '</div><div>'
-            '<div class="cert-field"><span class="cert-label">Date of Death</span><span>' + escape(str(fd.get("dod", "—"))) + '</span></div>'
-            '<div class="cert-field"><span class="cert-label">Place of Death</span><span>' + escape(fd.get("place_of_death", "—")) + '</span></div>'
-            '<div class="cert-field"><span class="cert-label">Type of Death</span><span>' + escape(fd.get("death_type", "—")) + '</span></div>'
-            '</div></div>'
+                with st.expander("Retrieved candidates per cause"):
+                    for item in st.session_state.icd_results.get("coded_causes", []):
+                        st.markdown(f"**{escape(item.get('line',''))} — {escape(item.get('cause',''))}**")
+                        cand_rows = []
+                        for c in item.get("candidates", [])[:8]:
+                            cand_rows.append({
+                                "Code": c.get("code_formatted", ""),
+                                "Description": c.get("short_desc", ""),
+                                "AcceptableMain": c.get("acceptable_main", ""),
+                                "Score": round(float(c.get("score", 0.0)), 4),
+                            })
+                        if cand_rows:
+                            st.dataframe(pd.DataFrame(cand_rows), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No candidates retrieved.")
 
-            '<div style="background:#f0f4ff;border-radius:6px;padding:.85rem 1rem;'
-            'margin-bottom:1rem;border:1px solid #b0c4de;font-size:.86rem">'
-            '<div style="font-weight:800;color:#1a4a7a;margin-bottom:.25rem">Starting Point / UCOD Decision</div>'
-            '<div><b>Rule:</b> ' + escape(sp_rule_for_cert) + '</div>'
-            '<div><b>Selected starting point:</b> ' + escape(underlying_text or "Not confirmed") + '</div>'
-            '<div><b>ICD status:</b> ' + escape(underlying_code or "Pending ICD review") + '</div>'
-            '</div>'
-
-            '<div style="background:var(--green-light);border-radius:6px;padding:1rem 1.2rem;'
-            'margin-bottom:1rem;border:1px solid #9ecaad">'
-            '<div style="font-weight:700;color:var(--green);margin-bottom:.6rem">Part I — Direct causal sequence</div>'
-            + part1_rows +
-            '</div>'
-
-            '<div style="background:#f8fafc;border-radius:6px;padding:1rem 1.2rem;'
-            'margin-bottom:1rem;border:1px solid #d7e2ea">'
-            '<div style="font-weight:700;color:#355c7d;margin-bottom:.6rem">Part II — Other significant conditions</div>'
-            + (part2_rows if part2_rows else '<div style="font-size:.85rem;color:#666">None documented.</div>')
-            + '</div>'
-
-            '<div style="background:#f0f4ff;border-radius:6px;padding:.7rem 1rem;'
-            'margin-bottom:1.4rem;border:1px solid #b0c4de;font-size:.85rem">'
-            '<b style="color:#1a4a7a">Underlying Cause (for mortality statistics):</b> '
-            '<span style="font-weight:700">' + escape(underlying_text or "Not confirmed") + '</span>'
-            ' <span style="font-family:monospace;font-weight:800;font-size:.95rem">[' + escape(underlying_code or "Pending ICD review") + ']</span>'
-            ' <span style="color:#667;font-size:.78rem">via ' + escape(sp_rule_for_cert) + '</span></div>'
-
-            '<div style="display:flex;justify-content:space-between;padding-top:1.2rem;border-top:1px solid #d0ddd2;gap:12px;flex-wrap:wrap">'
-            '<div><div style="font-weight:700;color:var(--green);font-size:.85rem">Certifying Physician</div>'
-            '<div>' + escape(doctor_name or "________________________________") + '</div>'
-            '<div style="font-size:.75rem;color:#888;margin-top:6px">Signature: _______________________</div></div>'
-            '<div class="cert-stamp">MOH<br>Official<br>Draft</div>'
-            '<div style="text-align:right"><div style="font-weight:700;color:var(--green);font-size:.85rem">Issue Date</div>'
-            '<div>' + escape(str(fd.get("date_issued", datetime.date.today()))) + '</div></div></div></div>',
-            unsafe_allow_html=True,
-        )
-
-        cert_lines = [
-            "DEATH CERTIFICATE",
-            f"Certificate No: {cert_no}",
-            "=" * 60,
-            f"Hospital: {hospital_name} - {hospital_city}",
-            "",
-            f"Name: {fd.get('full_name', '')}",
-            f"ID: {fd.get('national_id', '')}",
-            f"Sex: {fd.get('sex', '')}",
-            f"Age: {fd.get('age_years', '')} years",
-            f"Date of death: {fd.get('dod', '')}",
-            f"Place of death: {fd.get('place_of_death', '')}",
-            "",
-            "PART I - DIRECT CAUSAL SEQUENCE",
-        ]
-        for i, item in enumerate(part1):
-            lbl = row_labels[i] if i < len(row_labels) else f"({i+1})"
-            cert_lines.append(
-                f"  {lbl} {item['cause']} | {item.get('code_formatted', '')} | {item.get('short_desc', '')} | interval: {item.get('interval', '—')}"
+            can_go_next = (
+                bool(st.session_state.get("agent2_done"))
+                and bool(st.session_state.get("icd_results"))
+                and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
             )
+            if st.button("Next → Agent 3", use_container_width=True, disabled=not can_go_next):
+                st.session_state.agent_step = 3
+                st.rerun()
 
-        cert_lines.append("")
-        cert_lines.append("PART II - OTHER SIGNIFICANT CONDITIONS")
-        if part2:
-            for item in part2:
-                cert_lines.append(
-                    f"  - {item['cause']} | {item.get('code_formatted', '')} | {item.get('short_desc', '')} | interval: {item.get('interval', '—')}"
+            close_agent_card()
+
+        # ------------------------------------------------------------------
+        # Agent 3: Mortality sequence / WHO / TABB validation
+        # ------------------------------------------------------------------
+        elif st.session_state.agent_step == 3:
+            if not st.session_state.get("agent2_done") or not st.session_state.get("icd_results"):
+                st.warning("Run Agent 2 first.")
+                if st.button("Back to Agent 2", use_container_width=True):
+                    st.session_state.agent_step = 2
+                    st.rerun()
+                st.stop()
+
+            render_agent_card_header(
+                3,
+                "Mortality Sequence / WHO Rules Agent",
+                "Applies SP1–SP8 starting-point logic and TABB ICD-code relationship checks, then confirms or flags the UCOD decision.",
+                state="active",
+            )
+            st.markdown(
+                """
+                <div class="agent-checklist">
+                <b>This agent validates:</b>
+                <ul>
+                  <li>SP1–SP8 starting-point logic</li>
+                  <li>Part I causal-chain plausibility</li>
+                  <li>TABB rules using normalized ICD codes</li>
+                  <li>UCOD decision and manual-review status</li>
+                </ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<div class="agent-condition"><b>Final condition:</b><br>If SP/TABB is uncertain, the certificate remains marked as Needs Review.</div>',
+                unsafe_allow_html=True,
+            )
+            render_agent_prompt_box(AGENT3_SYSTEM_PROMPT)
+
+            b_run, b_back = st.columns([1.4, 1])
+            with b_run:
+                if st.button("Run Agent 3 — WHO / TABB Review", type="primary", use_container_width=True):
+                    with st.spinner("Agent 3 is reviewing SP rules and TABB code relationships..."):
+                        tabb_df = load_tabb_rules()
+                        st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
+                            API_KEY,
+                            st.session_state.icd_results,
+                            tabb_df,
+                        )
+                        st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
+                            "validation",
+                            st.session_state.icd_results.get("validation", {}),
+                        )
+                    st.session_state.agent3_done = True
+                    st.rerun()
+            with b_back:
+                if st.button("← Back to Agent 2", use_container_width=True):
+                    st.session_state.agent_step = 2
+                    st.rerun()
+
+            render_agent_result(st.session_state.get("agent3_result"))
+
+            if st.session_state.get("agent3_result"):
+                sp_review = st.session_state.agent3_result.get("sp_review", {})
+                tabb_result = st.session_state.agent3_result.get("tabb_result", {})
+                validation = st.session_state.agent3_result.get("validation", {})
+                st.markdown("**Starting point / UCOD**")
+                st.markdown(
+                    f"""
+                    <div class="muted-box">
+                      <b>SP Rule:</b> {escape(sp_review.get("sp_rule", "—"))}<br>
+                      <b>Selected cause:</b> {escape(sp_review.get("selected_cause", "—"))}<br>
+                      <b>Selected ICD:</b> {escape(sp_review.get("selected_code", validation.get("underlying_cause", "—")))}<br>
+                      <b>Quality:</b> {escape(validation.get("overall_quality", "Needs Review"))}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-        else:
-            cert_lines.append("  None documented.")
+                st.markdown("**TABB result**")
+                st.markdown(
+                    f'<div class="muted-box">{escape(tabb_result.get("summary", "No TABB result available."))}</div>',
+                    unsafe_allow_html=True,
+                )
+                if tabb_result.get("matches") or tabb_result.get("reverse_matches"):
+                    tabb_rows = []
+                    for m in (tabb_result.get("matches", []) + tabb_result.get("reverse_matches", [])):
+                        tabb_rows.append({
+                            "Rule": m.get("rule_type", ""),
+                            "Anchor": m.get("anchor_checked", ""),
+                            "Other": m.get("other_checked", ""),
+                            "Target": m.get("target", ""),
+                            "Direction": m.get("direction", ""),
+                        })
+                    st.dataframe(pd.DataFrame(tabb_rows), use_container_width=True, hide_index=True)
 
-        cert_lines += [
-            "",
-            f"Underlying cause: {underlying_code}",
-            "",
-            f"Physician: {doctor_name}",
-            f"Issue date: {fd.get('date_issued', '')}",
-        ]
+                st.markdown("**Final coded causes**")
+                render_compact_coded_causes(st.session_state.icd_results.get("coded_causes", []))
 
-        st.download_button(
-            "Download Certificate Summary (.txt)",
-            data="\n".join(cert_lines).encode("utf-8"),
-            file_name=f"{sanitize_filename('death_cert_' + cert_no_safe)}.txt",
-            mime="text/plain",
-        )
+            b_final, b_new = st.columns([1.4, 1])
+            with b_final:
+                if st.button("Go to Final Certificate", use_container_width=True, disabled=not bool(st.session_state.get("agent3_done"))):
+                    st.session_state.page = 5
+                    st.rerun()
+            with b_new:
+                if st.button("New Certificate", use_container_width=True):
+                    keys_to_remove = [k for k in st.session_state.keys() if str(k).startswith("code_edit_") or str(k).startswith("agent_part")]
+                    for k in keys_to_remove:
+                        del st.session_state[k]
+                    st.session_state.page = 1
+                    st.session_state.form_data = {}
+                    st.session_state.icd_results = None
+                    reset_agent_workflow(clear_codes=True)
+                    st.rerun()
 
-    with tab_debug:
-        st.subheader("Claude-extracted structure")
-        st.json(concepts)
-
-    st.markdown("---")
-    b1, b2, b3, _ = st.columns([1, 1.3, 1.2, 5])
-
-    with b1:
-        if st.button("Back", use_container_width=True):
-            st.session_state.page = 3
-            st.session_state.icd_results = None
-            st.rerun()
-
-    with b2:
-        if st.button("Go to Final Certificate", use_container_width=True):
-            st.session_state.page = 5
-            st.rerun()
-
-    with b3:
-        if st.button("New Certificate", use_container_width=True):
-            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
-            for k in keys_to_remove:
-                del st.session_state[k]
-            st.session_state.page = 1
-            st.session_state.form_data = {}
-            st.session_state.icd_results = None
-            for k in list(st.session_state.keys()):
-                if k.startswith("part1_") or k.startswith("part2_"):
-                    del st.session_state[k]
-            st.rerun()
+            close_agent_card()
 
 # =============================================================================
 # PAGE 5 — Final Certificate with PDF Download
