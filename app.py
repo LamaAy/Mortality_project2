@@ -33,7 +33,7 @@ import anthropic
 st.set_page_config(
     page_title="Death Certificate | Saudi MOH",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # =============================================================================
@@ -65,9 +65,21 @@ html, body, [class*="css"] {
 
 .main .block-container {
   background: var(--gray-bg);
-  padding: 1.5rem 2rem;
-  max-width: 1280px;
+  padding: 1.25rem 1.25rem;
+  max-width: 100%;
+  overflow-x: hidden;
 }
+
+[data-testid="stAppViewContainer"] {
+  overflow-x: hidden;
+}
+
+/* Keep the sidebar from covering/cutting the page on smaller screens. */
+section[data-testid="stSidebar"] {
+  min-width: 280px !important;
+  max-width: 310px !important;
+}
+
 
 .moh-header {
   background: linear-gradient(135deg, var(--green) 0%, var(--green-mid) 55%, var(--green-dark) 100%);
@@ -355,6 +367,44 @@ div[data-testid="stButton"] > button {
   font-size: .76rem;
   margin-top: -.25rem;
   margin-bottom: .45rem;
+}
+
+
+.agent2-code-list {
+  margin-top: .8rem;
+}
+.agent2-code-item {
+  background:#ffffff;
+  border:1px solid #d8e6db;
+  border-radius:12px;
+  padding:.75rem .85rem;
+  margin:.65rem 0;
+  overflow-wrap:anywhere;
+}
+.agent2-code-line {
+  font-weight:800;
+  color:#006940;
+  font-size:.9rem;
+}
+.agent2-code-cause {
+  font-weight:650;
+  margin:.18rem 0 .28rem;
+}
+.agent2-selected-code {
+  font-size:.9rem;
+}
+.agent2-top3 {
+  margin-top:.35rem;
+  font-size:.86rem;
+}
+.agent2-top3 ol {
+  margin:.25rem 0 0 1.1rem;
+  padding-left:.5rem;
+}
+.small-agent-buttons div[data-testid="stButton"] button {
+  padding:.42rem .85rem !important;
+  font-size:.84rem !important;
+  min-height:2.25rem !important;
 }
 
 </style>
@@ -4031,14 +4081,15 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
             top_rows.append(f"<li><b>{c_code}</b> — {c_desc}{escape(score_txt)}</li>")
         top_html = "".join(top_rows) if top_rows else "<li>No retrieved candidates shown.</li>"
 
-        items_html.append(f'''
-        <div class="agent2-code-item">
-          <div class="agent2-code-line">Line {line} · {role}</div>
-          <div class="agent2-code-cause">{cause}</div>
-          <div class="agent2-selected-code"><b>Selected ICD:</b> {selected_code} — {selected_desc}<br><span class="agent-hidden-details-note">Status: {status_txt}</span></div>
-          <div class="agent2-top3"><b>Top 3 retrieved candidates:</b><ol>{top_html}</ol></div>
-        </div>
-        ''')
+        items_html.append(
+            f'<div class="agent2-code-item">'
+            f'<div class="agent2-code-line">Line {line} · {role}</div>'
+            f'<div class="agent2-code-cause">{cause}</div>'
+            f'<div class="agent2-selected-code"><b>Selected ICD:</b> {selected_code} — {selected_desc}<br>'
+            f'<span class="agent-hidden-details-note">Status: {status_txt}</span></div>'
+            f'<div class="agent2-top3"><b>Top 3 retrieved candidates:</b><ol>{top_html}</ol></div>'
+            f'</div>'
+        )
 
     if not items_html:
         items_html.append('<div class="agent-hidden-details-note">No ICD-coded causes are available yet.</div>')
@@ -4053,16 +4104,16 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
     else:
         note = "All entered Part I/Part II causes have selected ICD codes."
 
-    html_out = f'''
-    <div class="{box_class}">
-      <div class="agent-kicker">AGENT 2</div>
-      <div class="agent-title">ICD Candidate Validation Agent</div>
-      <div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>
-      <div>{escape(summary)}</div>
-      <div class="agent-hidden-details-note">{escape(note)}</div>
-      <div class="agent2-code-list">{''.join(items_html)}</div>
-    </div>
-    '''
+    html_out = (
+        f'<div class="{box_class}">'
+        f'<div class="agent-kicker">AGENT 2</div>'
+        f'<div class="agent-title">ICD Candidate Validation Agent</div>'
+        f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
+        f'<div>{escape(summary)}</div>'
+        f'<div class="agent-hidden-details-note">{escape(note)}</div>'
+        f'<div class="agent2-code-list">{"".join(items_html)}</div>'
+        f'</div>'
+    )
     st.markdown(html_out, unsafe_allow_html=True)
 
 def render_agent3_result(result: Dict) -> None:
@@ -4128,24 +4179,24 @@ def render_agent3_result(result: Dict) -> None:
     else:
         tabb_text += "; no actionable TABB change found"
 
-    html_out = f"""
-    <div class="{box_class}">
-      <div class="agent-kicker">AGENT 3</div>
-      <div class="agent-title">Mortality Sequence / WHO Rules Agent</div>
-      <div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>
-      <div>{escape(summary)}</div>
-      <div class="agent-sp-grid">
-        <div><b>SP rule</b><br>{escape(sp_rule)}</div>
-        <div><b>Selected line</b><br>{escape(line_display)}</div>
-        <div><b>Selected cause</b><br>{escape(selected_cause or 'Not selected')}</div>
-        <div><b>Selected ICD</b><br>{escape(selected_code or 'Pending/none')}</div>
-      </div>
-      <div class="agent-hidden-details-note"><b>Reason:</b> {escape(explanation or summary)}</div>
-      <div class="agent-hidden-details-note"><b>TABB:</b> {escape(tabb_text)}</div>
-      {links_html}
-      {issue_html}
-    </div>
-    """
+    html_out = (
+        f'<div class="{box_class}">'
+        f'<div class="agent-kicker">AGENT 3</div>'
+        f'<div class="agent-title">Mortality Sequence / WHO Rules Agent</div>'
+        f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
+        f'<div>{escape(summary)}</div>'
+        f'<div class="agent-sp-grid">'
+        f'<div><b>SP rule</b><br>{escape(sp_rule)}</div>'
+        f'<div><b>Selected line</b><br>{escape(line_display)}</div>'
+        f'<div><b>Selected cause</b><br>{escape(selected_cause or "Not selected")}</div>'
+        f'<div><b>Selected ICD</b><br>{escape(selected_code or "Pending/none")}</div>'
+        f'</div>'
+        f'<div class="agent-hidden-details-note"><b>Reason:</b> {escape(explanation or summary)}</div>'
+        f'<div class="agent-hidden-details-note"><b>TABB:</b> {escape(tabb_text)}</div>'
+        f'{links_html}'
+        f'{issue_html}'
+        f'</div>'
+    )
     st.markdown(html_out, unsafe_allow_html=True)
 
 def render_agent_prompt_box(prompt_text: str) -> None:
