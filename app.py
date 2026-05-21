@@ -3781,4 +3781,53 @@ elif st.session_state.page == 5:
     final_lines += [
         "",
         "WHO NOTE",
-        who_notes
+        who_notes,
+        "",
+        "ORIGINAL NARRATIVE",
+        fd.get("free_text", ""),
+        "",
+        f"Issue Date: {fd.get('date_issued', '')}",
+        f"Physician: {doctor_name}",
+    ]
+
+    with dl2:
+        st.download_button(
+            label="⬇ Download Summary as Text (.txt)",
+            data="\n".join(final_lines).encode("utf-8"),
+            file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    b1, b2, b3, _ = st.columns([1, 1, 1.2, 5])
+
+    with b1:
+        if st.button("Back to Review", use_container_width=True):
+            st.session_state.page = 4
+            st.rerun()
+
+    with b2:
+        if st.button("Edit Narrative", use_container_width=True):
+            st.session_state.page = 3
+            st.rerun()
+
+    with b3:
+        if st.button("New Certificate", use_container_width=True):
+            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.session_state.page = 1
+            st.session_state.form_data = {}
+            st.session_state.icd_results = None
+            for k in list(st.session_state.keys()):
+                if k.startswith("part1_") or k.startswith("part2_"):
+                    del st.session_state[k]
+            # clear pdf cache too
+            for k in ["pdf_bytes_cached", "pdf_cert_no"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
