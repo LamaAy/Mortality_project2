@@ -226,6 +226,44 @@ section[data-testid="stSidebar"] .stTextInput input {
 
 .stTabs [data-baseweb="tab"] { font-weight:600; font-size:.88rem; }
 .stTabs [aria-selected="true"] { color:var(--green) !important; border-bottom-color:var(--green) !important; }
+
+
+/* Compact agent display: show only agent name, run controls, and final output. */
+.agent-checklist,
+.agent-prompt,
+.agent-condition,
+.agent-mini-stepper {
+  display: none !important;
+}
+.agent-card {
+  padding: 1.2rem 1.35rem !important;
+}
+.agent-subtitle {
+  display: none !important;
+}
+.agent-output-box {
+  background: #f8faf8;
+  border: 1px solid #d8e6db;
+  border-left: 5px solid var(--green);
+  border-radius: 10px;
+  padding: .9rem 1rem;
+  margin: .85rem 0 1rem;
+  font-size: .92rem;
+  line-height: 1.55;
+}
+.agent-output-status {
+  font-weight: 850;
+  margin-bottom: .35rem;
+  color: var(--green);
+}
+.agent-output-status.warn { color: #a66a00; }
+.agent-output-status.block { color: #c0392b; }
+.agent-hidden-details-note {
+  color: var(--muted);
+  font-size: .78rem;
+  margin-top: .25rem;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -375,6 +413,62 @@ st.markdown("""
   font-size:1.55rem;
   font-weight:900;
   margin:.35rem 0;
+}
+.agent-preview-card {
+  background:#ffffff;
+  border:2px solid var(--green);
+  border-radius:18px;
+  padding:1rem 1.1rem;
+  box-shadow:0 8px 22px rgba(0,105,64,.08);
+  margin-bottom:.9rem;
+}
+.agent-preview-title {
+  font-size:1.05rem;
+  font-weight:850;
+  color:#1a2e1a;
+  margin:.25rem 0 .4rem;
+}
+.agent-preview-subtitle {
+  color:var(--muted);
+  font-size:.82rem;
+  line-height:1.45;
+  margin-bottom:.7rem;
+}
+.agent-goodbad-grid {
+  display:grid;
+  grid-template-columns:1fr;
+  gap:.65rem;
+}
+.agent-good-box,
+.agent-bad-box {
+  border-radius:12px;
+  padding:.75rem .85rem;
+  font-size:.82rem;
+  line-height:1.5;
+}
+.agent-good-box {
+  background:#edf8f1;
+  border:1px solid #b8dec6;
+  color:#0c5c35;
+}
+.agent-bad-box {
+  background:#fff8e6;
+  border:1px solid #edd187;
+  color:#6d4b00;
+}
+.agent-bad-box.error {
+  background:#fff1f1;
+  border-color:#efb8b8;
+  color:#8a1f1f;
+}
+.agent-good-box ul,
+.agent-bad-box ul {
+  margin:.25rem 0 0 1.05rem;
+  padding:0;
+}
+.agent-good-box li,
+.agent-bad-box li {
+  margin:.18rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -3500,31 +3594,50 @@ def close_agent_card() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 def render_agent_result(result: Dict) -> None:
+    """Compact agent output renderer.
+    Shows only the agent result summary and a very short issue count.
+    Detailed findings, candidate tables, prompts, and rule internals are intentionally hidden.
+    """
     if not result:
+        st.markdown(
+            '<div class="agent-output-box">Run this agent to see its output.</div>',
+            unsafe_allow_html=True,
+        )
         return
-    status = result.get("status", "warning")
-    st.markdown(
-        f'<div class="{agent_status_class(status)}"><b>Status:</b> {escape(status.upper())}<br>{escape(result.get("summary", ""))}</div>',
-        unsafe_allow_html=True,
-    )
+
+    status = str(result.get("status", "warning")).lower()
+    status_label = {
+        "pass": "PASSED",
+        "warning": "REVIEW SUGGESTED",
+        "block": "BLOCKED",
+    }.get(status, status.upper())
+
+    status_class = "block" if status == "block" else ("warn" if status == "warning" else "")
+    summary = str(result.get("summary", "Agent completed its review.") or "Agent completed its review.")
+
     issues = result.get("issues", []) or result.get("rule_issues", []) or []
-    if issues:
-        st.markdown('<div class="agent-checklist"><b>Findings</b><ul>', unsafe_allow_html=True)
-        for issue in issues[:10]:
-            if isinstance(issue, dict):
-                msg = f"{issue.get('line','')}: {issue.get('message','')}"
-            else:
-                msg = str(issue)
-            st.markdown(f"<li>{escape(msg)}</li>", unsafe_allow_html=True)
-        st.markdown("</ul></div>", unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="agent-condition"><b>Condition to continue:</b><br>{escape(result.get("condition_to_continue", ""))}</div>',
-        unsafe_allow_html=True,
+    errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "error"]
+    warnings = [i for i in issues if not (isinstance(i, dict) and str(i.get("severity", "")).lower() == "error")]
+
+    if errors:
+        output_note = f"{len(errors)} blocking issue(s) found. Please correct the doctor-entry fields before continuing."
+    elif warnings:
+        output_note = f"{len(warnings)} review warning(s) found. You may continue, but review is recommended."
+    else:
+        output_note = "No blocking issue was detected."
+
+    html_out = (
+        '<div class="agent-output-box">'
+        f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
+        f'<div>{escape(summary)}</div>'
+        f'<div class="agent-hidden-details-note">{escape(output_note)}</div>'
+        '</div>'
     )
+    st.markdown(html_out, unsafe_allow_html=True)
 
 def render_agent_prompt_box(prompt_text: str) -> None:
-    with st.expander("Agent prompt"):
-        st.markdown(f'<div class="agent-prompt">{escape(prompt_text.strip())}</div>', unsafe_allow_html=True)
+    """Prompt details are hidden in compact UI mode."""
+    return
 
 def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
     """Left-side editable doctor panel used on the agent workflow page."""
@@ -3857,19 +3970,72 @@ elif st.session_state.page == 3:
                 inline_note("Contributing condition recorded.", "ok")
 
     with right:
-        st.markdown('<div class="section-title">Assistant</div>', unsafe_allow_html=True)
-        if not has_any_cod_input:
-            st.markdown('<div class="mini-status"><b>Ready when you are</b><br><span style="color:#5a7060;font-size:.84rem">Start with Part I line (a). No warnings are shown before typing.</span></div>', unsafe_allow_html=True)
-        else:
-            if blocking_issues:
-                st.markdown('<div class="mini-status"><b style="color:#c0392b">Review needed before coding</b><br><span style="color:#5a7060;font-size:.84rem">Fix the messages shown under each field before starting the agent workflow.</span></div>', unsafe_allow_html=True)
-            elif nonblocking_issues:
-                st.markdown('<div class="mini-status"><b style="color:#a66a00">Coding possible, review suggested</b><br><span style="color:#5a7060;font-size:.84rem">Warnings are shown under the relevant field. SP/WHO/TABB checks will appear only in Agent 3.</span></div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="mini-status"><b style="color:#006940">Ready for agent workflow</b><br><span style="color:#5a7060;font-size:.84rem">No live form warnings detected. Press Review & Find Codes to start Agent 1.</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Agent 1 — Input Validation Agent</div>', unsafe_allow_html=True)
 
-            st.markdown('<div class="muted-box"><b style="color:#006940">Sequential agents</b><br><span style="font-size:.82rem;color:#5a7060">Agent 1 checks input. Agent 2 retrieves and validates ICD candidates. Agent 3 applies WHO/SP and TABB logic. No SP result is shown on this doctor-entry page.</span></div>', unsafe_allow_html=True)
-            st.caption("SP/UCOD reasoning appears only inside the Mortality Sequence / WHO Rules Agent.")
+        # Build a simple doctor-facing Good / Needs Attention preview for Agent 1 only.
+        # ICD retrieval warnings are still shown under fields, but this card stays focused on input/form quality.
+        input_issues = list(all_pre_issues)
+        input_errors = [x for x in input_issues if x.get("severity") == "error" or x.get("blocking")]
+        input_warnings = [x for x in input_issues if x.get("severity") != "error" and not x.get("blocking")]
+
+        good_items = []
+        if precheck["part1_chain"]:
+            good_items.append("Part I has at least one completed cause line.")
+        if precheck["part1_chain"] and not any(i.get("type") == "skipped_line" for i in input_issues):
+            good_items.append("Completed Part I lines are consecutive; no skipped line detected.")
+        if has_any_cod_input and not any(i.get("type") == "multiple_causes" for i in input_issues):
+            good_items.append("Each completed line appears to contain one condition.")
+        if has_any_cod_input and not any(i.get("type") in {"missing_interval", "ambiguous_interval", "unclear_interval"} for i in input_issues):
+            good_items.append("Intervals are present and readable for completed lines.")
+        if has_any_cod_input and not input_errors:
+            good_items.append("No blocking input/form error is detected.")
+        if not good_items:
+            good_items.append("Waiting for the doctor to enter Part I line (a).")
+
+        attention_items = []
+        for issue in (input_errors + input_warnings)[:6]:
+            line = str(issue.get("line", "")).strip()
+            msg = str(issue.get("message", "Please review this field.")).strip()
+            attention_items.append(f"{line}: {msg}" if line else msg)
+        if not attention_items:
+            attention_items.append("No bad input/form issue detected by Agent 1.")
+
+        bad_class = "agent-bad-box error" if input_errors else "agent-bad-box"
+        status_text = "BLOCKED" if input_errors else ("REVIEW" if input_warnings else "GOOD")
+        status_color = "#c0392b" if input_errors else ("#a66a00" if input_warnings else "#006940")
+
+        good_html = "".join([f"<li>{escape(x)}</li>" for x in good_items])
+        bad_html = "".join([f"<li>{escape(x)}</li>" for x in attention_items])
+
+        st.markdown(
+            f"""
+            <div class="agent-preview-card">
+              <div class="agent-kicker">AGENT 1</div>
+              <div class="agent-preview-title">Input Validation Agent</div>
+              <div class="agent-preview-subtitle">
+                First step only: checks the doctor-entered form before ICD retrieval. SP/WHO/TABB appears later in Agent 3.
+              </div>
+              <div style="font-size:.82rem;margin-bottom:.55rem;color:{status_color};font-weight:850">Status: {status_text}</div>
+              <div class="agent-goodbad-grid">
+                <div class="agent-good-box">
+                  <b>Good</b>
+                  <ul>{good_html}</ul>
+                </div>
+                <div class="{bad_class}">
+                  <b>Bad / Needs attention</b>
+                  <ul>{bad_html}</ul>
+                </div>
+              </div>
+              <div class="agent-condition">
+                <b>Condition to continue:</b><br>
+                Agent 2 opens only when Agent 1 has no blocking input/form errors.
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.caption("The yellow medical/ICD warnings under the fields are suggestions. Full ICD retrieval starts in Agent 2.")
 
     b1, b2, _ = st.columns([1, 1.8, 5.5])
     with b1:
@@ -3878,7 +4044,7 @@ elif st.session_state.page == 3:
             st.rerun()
     with b2:
         can_analyze = bool(precheck["part1_chain"]) and not bool(blocking_issues)
-        if st.button("Review & Find Codes", use_container_width=True, type="primary", disabled=(not can_analyze)):
+        if st.button("Open Agent 1 Workflow", use_container_width=True, type="primary", disabled=(not can_analyze)):
             if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
@@ -3945,7 +4111,7 @@ elif st.session_state.page == 4:
         st.session_state.agent_step = 1
 
     st.markdown('<div class="section-title">Review & Coding — Sequential LLM Agents</div>', unsafe_allow_html=True)
-    st.caption("The doctor edits the certificate on the left. The right side shows one LLM agent at a time.")
+    st.caption("The doctor edits the certificate on the left. The right side shows one agent at a time with a compact output only.")
 
     left, right = st.columns([1.35, 1.0], gap="large")
 
@@ -4086,25 +4252,8 @@ elif st.session_state.page == 4:
 
             render_agent_result(st.session_state.get("agent2_result"))
 
-            if st.session_state.get("icd_results"):
-                st.markdown("**Selected ICD codes**")
-                render_compact_coded_causes(st.session_state.icd_results.get("coded_causes", []))
-
-                with st.expander("Retrieved candidates per cause"):
-                    for item in st.session_state.icd_results.get("coded_causes", []):
-                        st.markdown(f"**{escape(item.get('line',''))} — {escape(item.get('cause',''))}**")
-                        cand_rows = []
-                        for c in item.get("candidates", [])[:8]:
-                            cand_rows.append({
-                                "Code": c.get("code_formatted", ""),
-                                "Description": c.get("short_desc", ""),
-                                "AcceptableMain": c.get("acceptable_main", ""),
-                                "Score": round(float(c.get("score", 0.0)), 4),
-                            })
-                        if cand_rows:
-                            st.dataframe(pd.DataFrame(cand_rows), use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No candidates retrieved.")
+            # Compact UI: ICD candidate tables are hidden here.
+            # The selected codes remain stored in st.session_state.icd_results and appear on the final certificate page.
 
             can_go_next = (
                 bool(st.session_state.get("agent2_done"))
@@ -4177,41 +4326,8 @@ elif st.session_state.page == 4:
 
             render_agent_result(st.session_state.get("agent3_result"))
 
-            if st.session_state.get("agent3_result"):
-                sp_review = st.session_state.agent3_result.get("sp_review", {})
-                tabb_result = st.session_state.agent3_result.get("tabb_result", {})
-                validation = st.session_state.agent3_result.get("validation", {})
-                st.markdown("**Starting point / UCOD**")
-                st.markdown(
-                    f"""
-                    <div class="muted-box">
-                      <b>SP Rule:</b> {escape(sp_review.get("sp_rule", "—"))}<br>
-                      <b>Selected cause:</b> {escape(sp_review.get("selected_cause", "—"))}<br>
-                      <b>Selected ICD:</b> {escape(sp_review.get("selected_code", validation.get("underlying_cause", "—")))}<br>
-                      <b>Quality:</b> {escape(validation.get("overall_quality", "Needs Review"))}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.markdown("**TABB result**")
-                st.markdown(
-                    f'<div class="muted-box">{escape(tabb_result.get("summary", "No TABB result available."))}</div>',
-                    unsafe_allow_html=True,
-                )
-                if tabb_result.get("matches") or tabb_result.get("reverse_matches"):
-                    tabb_rows = []
-                    for m in (tabb_result.get("matches", []) + tabb_result.get("reverse_matches", [])):
-                        tabb_rows.append({
-                            "Rule": m.get("rule_type", ""),
-                            "Anchor": m.get("anchor_checked", ""),
-                            "Other": m.get("other_checked", ""),
-                            "Target": m.get("target", ""),
-                            "Direction": m.get("direction", ""),
-                        })
-                    st.dataframe(pd.DataFrame(tabb_rows), use_container_width=True, hide_index=True)
-
-                st.markdown("**Final coded causes**")
-                render_compact_coded_causes(st.session_state.icd_results.get("coded_causes", []))
+            # Compact UI: SP/TABB internals and final coded-cause tables are hidden here.
+            # The final certificate page keeps the complete coded result for review/download.
 
             b_final, b_new = st.columns([1.4, 1])
             with b_final:
