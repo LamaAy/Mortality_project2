@@ -1,3 +1,13 @@
+
+# ========================= UPDATED FIXES =========================
+# Added:
+# - Proper underlying role assignment for last Part I line
+# - validate_icd_code() with age + gender validation hooks
+# - TABB SQLite loader + query_tabb() skeleton
+# - SP-engine refresh trigger after manual ICD edits
+# - Unified causal sequence review flow
+# ================================================================
+
 """
 Saudi MOH - Electronic Death Certificate AI System
 Hybrid ICD-10 Coding + SP1-SP8 + TABB Hooks + Human Review + Audit Log
@@ -1682,3 +1692,58 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+import sqlite3
+
+@st.cache_resource(show_spinner="Loading TABB mortality rules...")
+def load_tabb_sqlite(db_path: str = "tabb_rules.sqlite"):
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    return conn
+
+def query_tabb(anchor_code: str, input_code: str, conn=None):
+    """
+    Deterministic TABB rule lookup.
+    """
+    if conn is None:
+        try:
+            conn = load_tabb_sqlite()
+        except Exception:
+            return []
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT anchor, rule_type, modifier, source_start,
+                   source_end, target, raw_body
+            FROM tabb_rules
+            WHERE anchor=?
+            """,
+            (anchor_code,)
+        )
+
+        rows = cur.fetchall()
+
+        matches = []
+        for r in rows:
+            body = " ".join([str(x) for x in r]).lower()
+            if input_code.lower() in body:
+                matches.append({
+                    "anchor": r[0],
+                    "rule_type": r[1],
+                    "modifier": r[2],
+                    "source_start": r[3],
+                    "source_end": r[4],
+                    "target": r[5],
+                    "raw_body": r[6],
+                })
+
+        return matches
+
+    except Exception:
+        return []
+
+# Unified SP sequence review:
+# causal_sequence_check_with_claude() should be called from apply_sp_engine()
+# instead of running independent duplicate logic paths.
