@@ -65,26 +65,46 @@ html, body, [class*="css"] {
 
 .main .block-container {
   background: var(--gray-bg);
-  padding: 1.25rem 1.25rem;
-  max-width: 100%;
+  padding: 1rem 1rem 1.5rem;
+  max-width: 1180px;
+  margin-left: auto;
+  margin-right: auto;
   overflow-x: hidden;
 }
 
-[data-testid="stAppViewContainer"] {
-  overflow-x: hidden;
+html, body, [data-testid="stAppViewContainer"], .main {
+  overflow-x: hidden !important;
 }
 
-/* Keep the sidebar from covering/cutting the page on smaller screens. */
+* {
+  box-sizing: border-box;
+}
+
+div[data-testid="column"] {
+  min-width: 0 !important;
+}
+
+/* Keep the sidebar from covering/cutting the page when opened. */
 section[data-testid="stSidebar"] {
-  min-width: 280px !important;
-  max-width: 310px !important;
+  min-width: 238px !important;
+  max-width: 260px !important;
+}
+
+@media (max-width: 1150px) {
+  .main .block-container {
+    max-width: 100%;
+    padding: .85rem .75rem 1.25rem;
+  }
+  .moh-header {
+    padding: 1rem 1.15rem !important;
+  }
 }
 
 
 .moh-header {
   background: linear-gradient(135deg, var(--green) 0%, var(--green-mid) 55%, var(--green-dark) 100%);
   color: white;
-  padding: 1.4rem 2rem;
+  padding: 1.15rem 1.5rem;
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -93,7 +113,7 @@ section[data-testid="stSidebar"] {
   box-shadow: 0 4px 18px rgba(0,105,64,.3);
   border-bottom: 3px solid var(--gold);
 }
-.moh-header h1 { font-size: 1.5rem; margin: 0; font-weight: 800; }
+.moh-header h1 { font-size: 1.35rem; margin: 0; font-weight: 800; }
 .moh-header p  { font-size: .82rem; margin: .2rem 0 0; opacity: .85; }
 .moh-emblem {
   width: 80px; height: 80px;
@@ -407,6 +427,20 @@ div[data-testid="stButton"] > button {
   min-height:2.25rem !important;
 }
 
+
+/* Prevent long agent output/candidate text from making the page wider than the screen. */
+.agent-card, .agent-preview-card, .doctor-edit-panel, .section-card, .moh-header {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.agent2-code-list, .agent2-code-item, .agent-output-box {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+.stDataFrame, div[data-testid="stDataFrame"] {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -572,6 +606,7 @@ st.markdown("""
   margin:.25rem 0 .4rem;
 }
 .agent-preview-subtitle {
+  display:none !important;
   color:var(--muted);
   font-size:.82rem;
   line-height:1.45;
@@ -624,7 +659,6 @@ st.markdown("""
   <div>
     <h1>Electronic Death Certificate System</h1>
     <p>Ministry of Health | Kingdom of Saudi Arabia</p>
-    <p style="font-size:.76rem;opacity:.72">Claude extraction + file-only ICD coding</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -4206,8 +4240,6 @@ def render_agent_prompt_box(prompt_text: str) -> None:
 def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
     """Left-side editable doctor panel used on the agent workflow page."""
     st.markdown('<div class="section-title">Doctor Editable Certificate Fields</div>', unsafe_allow_html=True)
-    st.caption("The doctor can modify these fields at any time. After changes, click Save Changes & Reset Agents.")
-
     st.markdown("**Part I — Direct causal sequence**")
     labels = {
         "a": ("Immediate cause", "e.g., septic shock"),
@@ -4574,9 +4606,6 @@ elif st.session_state.page == 3:
             <div class="agent-preview-card">
               <div class="agent-kicker">AGENT 1</div>
               <div class="agent-preview-title">Input Validation Agent</div>
-              <div class="agent-preview-subtitle">
-                First step only: checks the doctor-entered form before ICD retrieval. SP/WHO/TABB appears later in Agent 3.
-              </div>
               <div style="font-size:.82rem;margin-bottom:.55rem;color:{status_color};font-weight:850">Status: {status_text}</div>
               <div class="agent-goodbad-grid">
                 <div class="agent-good-box">
