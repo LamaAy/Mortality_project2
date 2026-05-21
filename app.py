@@ -237,19 +237,28 @@ section[data-testid="stSidebar"] .stTextInput input {
 }
 .agent-card {
   padding: 1.2rem 1.35rem !important;
+  min-height: auto !important;
 }
 .agent-subtitle {
   display: none !important;
 }
 .agent-output-box {
-  background: #f8faf8;
-  border: 1px solid #d8e6db;
-  border-left: 5px solid var(--green);
-  border-radius: 10px;
-  padding: .9rem 1rem;
+  background: #ffffff;
+  border: 2px solid var(--green);
+  border-radius: 18px;
+  padding: 1.1rem 1.2rem;
   margin: .85rem 0 1rem;
-  font-size: .92rem;
+  font-size: .95rem;
   line-height: 1.55;
+  box-shadow: 0 8px 22px rgba(0, 105, 64, .08);
+}
+.agent-output-box.warn {
+  border-color: #d8a100;
+  background: #fffaf0;
+}
+.agent-output-box.block {
+  border-color: #c0392b;
+  background: #fff7f7;
 }
 .agent-output-status {
   font-weight: 850;
@@ -281,7 +290,7 @@ st.markdown("""
   border: 1.7px solid #c8dece;
   border-radius: 18px;
   padding: 1.15rem 1.25rem;
-  min-height: 430px;
+  min-height: auto;
   box-shadow: 0 8px 22px rgba(0, 105, 64, .08);
   margin-bottom: 1rem;
 }
@@ -2984,7 +2993,14 @@ def apply_sp_engine(api_key: str, concepts: Dict, coded_causes: List[Dict]) -> D
     part1_chain = concepts.get("part1_chain", []) or []
     part2_conditions = concepts.get("part2_conditions", []) or []
     sp = llm_sp1_sp8_review(api_key, part1_chain, part2_conditions, coded_causes)
-    sp = refine_sp7_sp8_with_excel(sp, coded_causes)
+
+    # Agent 3 must judge mortality sequence / WHO-SP / TABB only.
+    # Do NOT downgrade Agent 3 because of Excel coding metadata such as
+    # R-code, ill-defined, AcceptableMain, or manual_review flags. Those
+    # warnings belong to Agent 2.
+    #
+    # If SP7/SP8 refinement is needed for final coding quality, keep it in
+    # Agent 2/final review rather than the compact Agent 3 result.
     sp["selected_code"] = selected_code_for_sp(sp, coded_causes)
     return sp
 
@@ -3488,39 +3504,138 @@ def agent2_candidate_validation_with_llm(api_key: str, coded_results: Dict, pati
     llm["condition_to_continue"] = fallback["condition_to_continue"]
     return llm
 
+def agent3_actionable_tabb_issues(tabb_result: Dict) -> List[Dict]:
+    """Return only TABB findings that should make Agent 3 warn.
+
+    TABB matches are often evidence that two certificate codes are related.
+    A match is not automatically a problem. Agent 3 should warn only when
+    the TABB rule clearly changes the UCOD decision or marks the selected
+    cause as trivial/problematic. General DS/LMP relationship matches are
+    stored internally but not shown as Agent 3 REVIEW.
+    """
+    if not tabb_result or not tabb_result.get("available"):
+        return []
+
+    selected_norm = normalize_icd_for_tabb(tabb_result.get("selected_code", ""))
+    actionable = []
+    rows = list(tabb_result.get("matches", []) or []) + list(tabb_result.get("reverse_matches", []) or [])
+    for m in rows:
+        rule_type = str(m.get("rule_type", "") or "").upper().strip()
+        target_norm = normalize_icd_for_tabb(m.get("target", ""))
+        modifier = str(m.get("modifier", "") or "").lower().strip()
+        raw_body = str(m.get("raw_body", "") or "").lower().strip()
+
+        selected_is_trivial = (
+            rule_type == "TRIV"
+            or "trivial" in modifier
+            or "trivial" in raw_body
+        )
+
+        target_changes_selected_code = bool(
+            target_norm
+            and selected_norm
+            and target_norm != selected_norm
+            and target_norm not in {"NAN", "NONE"}
+        )
+
+        # Only these should change the compact Agent 3 result.
+        is_actionable = selected_is_trivial or (rule_type in {"DSC", "LMC", "SMC", "SDC"} and target_changes_selected_code)
+
+        if is_actionable:
+            actionable.append({
+                "line": m.get("other_line", ""),
+                "severity": "warning",
+                "message": "TABB actionable rule: " + tabb_rule_message(m),
+            })
+    return actionable
+
+def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, List[Dict], str]:
+    """Decide Agent 3 status from SP/TABB sequence only.
+
+    Agent 2 owns ICD-code quality warnings. Agent 3 should be PASS when the
+    Part I causal sequence supports the selected UCOD and no actionable TABB
+    rule changes it.
+    """
+    issues: List[Dict] = []
+    sp_rule = str(sp_review.get("sp_rule", "REVIEW") or "REVIEW").upper()
+    selected = str(sp_review.get("selected_cause", "") or "").strip()
+    selected_code = str(sp_review.get("selected_code", "") or "").strip()
+
+    sequence_confirmed = (
+        sp_rule in {"SP1", "SP2", "SP3", "SP4", "SP6"}
+        and bool(selected)
+        and not (sp_review.get("full_sequence_valid") is False and sp_rule in {"SP3"})
+    )
+
+    # Keep only true sequence warnings. Ignore coding-metadata wording that may
+    # be produced by the LLM or older SP refinements.
+    for warning in sp_review.get("warnings", []) or []:
+        w = str(warning).strip()
+        wl = w.lower()
+        if not w:
+            continue
+        if any(term in wl for term in [
+            "coding", "metadata", "ill-defined", "ill defined", "vague",
+            "acceptablemain", "not acceptable", "manual review", "r-code",
+        ]):
+            continue
+        if sequence_confirmed:
+            continue
+        issues.append({
+            "line": sp_review.get("selected_line", ""),
+            "severity": "warning",
+            "message": w,
+        })
+
+    if not sequence_confirmed:
+        issues.append({
+            "line": sp_review.get("selected_line", ""),
+            "severity": "warning",
+            "message": sp_review.get("explanation", "SP/WHO review could not fully confirm the UCOD starting point."),
+        })
+
+    issues.extend(agent3_actionable_tabb_issues(tabb_result))
+
+    if not issues:
+        code_txt = f" ({selected_code})" if selected_code else ""
+        summary = f"UCOD sequence accepted. Selected starting point: {selected}{code_txt}."
+        return "pass", [], summary
+
+    return "warning", issues, "UCOD sequence needs review based on SP/WHO or actionable TABB findings."
+
 def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame) -> Dict:
     concepts = coded_results.get("concepts", {}) or {}
     coded_causes = coded_results.get("coded_causes", []) or []
     validation = coded_results.get("validation", {}) or {}
 
+    # SP/WHO review selects the starting point / UCOD candidate.
     sp_review = apply_sp_engine(api_key, concepts, coded_causes)
     validation = apply_sp_result_to_validation(validation, sp_review, coded_causes)
-    validation["overall_quality"] = quality_from_sp_and_validation(coded_causes, validation, sp_review)
 
+    # TABB is checked, but coding-quality warnings from Agent 2 should not make
+    # Agent 3 fail. Agent 3 status is based only on sequence/SP/TABB actionability.
     tabb_result = run_tabb_certificate_check(tabb_df, coded_causes, sp_review, validation)
-    validation = apply_tabb_result_to_validation(validation, tabb_result)
+    agent3_status, rule_issues, agent3_summary = agent3_sequence_status(sp_review, tabb_result)
 
-    if sp_review.get("needs_manual_review") or sp_review.get("sp_rule") in {"REVIEW", "SP5", "SP7", "SP8"}:
+    validation["tabb_result"] = tabb_result
+    validation["agent3_sequence_status"] = agent3_status
+    validation["agent3_sequence_summary"] = agent3_summary
+
+    # Preserve final certificate quality separately. Coding issues can still make
+    # the final certificate need review, but the compact Agent 3 output remains
+    # focused on mortality-sequence correctness.
+    if agent3_status == "pass":
+        validation.setdefault("overall_quality", "Good")
+        if not validation.get("coding_issues"):
+            validation["overall_quality"] = "Excellent"
+    else:
         validation["overall_quality"] = "Needs Review"
-    if tabb_result.get("needs_manual_review"):
-        validation["overall_quality"] = "Needs Review"
-
-    rule_issues = []
-    for warning in sp_review.get("warnings", []) or []:
-        rule_issues.append({"line": sp_review.get("selected_line", ""), "severity": "warning", "message": str(warning)})
-    if tabb_result.get("needs_manual_review"):
-        rule_issues.append({"line": sp_review.get("selected_line", ""), "severity": "warning", "message": tabb_result.get("summary", "")})
-    if validation.get("coding_issues"):
-        for i in validation.get("coding_issues", [])[:8]:
-            rule_issues.append({"line": "Final", "severity": "warning", "message": str(i)})
-
-    status = "warning" if validation.get("overall_quality") == "Needs Review" else "pass"
 
     fallback = {
-        "status": status,
-        "summary": f"Mortality sequence review completed. Final quality: {validation.get('overall_quality', 'Needs Review')}.",
+        "status": agent3_status,
+        "summary": agent3_summary,
         "issues": rule_issues,
-        "condition_to_continue": "Manual review is required before final submission." if status != "pass" else "Certificate can continue to final preview.",
+        "condition_to_continue": "Certificate can continue to final preview." if agent3_status == "pass" else "Manual review is recommended before final submission.",
     }
 
     payload = {
@@ -3539,16 +3654,21 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
         ],
         "sp_review": sp_review,
         "tabb_result": tabb_result,
-        "validation": validation,
-        "instruction": "Explain the SP/TABB result. Do not invent causes or ICD codes.",
+        "agent3_rule_issues": rule_issues,
+        "instruction": "Explain only the mortality sequence / SP / TABB result. Do not repeat Agent 2 coding-quality warnings unless they directly change UCOD selection.",
     }
-    llm = call_claude_json(api_key, AGENT3_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=1000, fallback=fallback)
+    llm = call_claude_json(api_key, AGENT3_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=800, fallback=fallback)
     if not isinstance(llm, dict):
         llm = fallback
 
-    llm["status"] = status
+    # Deterministic sequence status is authoritative. LLM may phrase the summary,
+    # but cannot downgrade a valid sequence because of Agent 2 coding issues.
+    llm["status"] = agent3_status
+    # Deterministic summary is authoritative so Agent 3 does not repeat Agent 2 coding warnings.
+    llm["summary"] = agent3_summary
     llm["blocking"] = False
     llm["rule_issues"] = rule_issues
+    llm["issues"] = rule_issues
     llm["sp_review"] = sp_review
     llm["tabb_result"] = tabb_result
     llm["validation"] = validation
@@ -3579,6 +3699,13 @@ def render_agent_stepper(current_step: int) -> None:
     st.markdown('<div class="agent-mini-stepper">' + "".join(html_pills) + '</div>', unsafe_allow_html=True)
 
 def render_agent_card_header(step: int, title: str, subtitle: str, state: str = "active") -> None:
+    """Compact title card only.
+
+    Important: do not leave an open HTML <div> across Streamlit widgets.
+    Streamlit renders each element separately, so an open div creates an empty
+    square and the output appears outside it. The actual agent output is
+    rendered by render_agent_result() as its own bordered square/card.
+    """
     state_class = "active" if state == "active" else ("done" if state == "done" else "blocked")
     st.markdown(
         f"""
@@ -3586,12 +3713,14 @@ def render_agent_card_header(step: int, title: str, subtitle: str, state: str = 
           <div class="agent-kicker">AGENT {step}</div>
           <div class="agent-title">{escape(title)}</div>
           <div class="agent-subtitle">{escape(subtitle)}</div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
 def close_agent_card() -> None:
-    st.markdown("</div>", unsafe_allow_html=True)
+    # No-op in compact mode. Cards are closed inside render_agent_card_header().
+    return
 
 def render_agent_result(result: Dict) -> None:
     """Compact agent output renderer.
@@ -3617,17 +3746,26 @@ def render_agent_result(result: Dict) -> None:
 
     issues = result.get("issues", []) or result.get("rule_issues", []) or []
     errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "error"]
-    warnings = [i for i in issues if not (isinstance(i, dict) and str(i.get("severity", "")).lower() == "error")]
+    warnings = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "warning"]
+    infos = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "info"]
 
     if errors:
         output_note = f"{len(errors)} blocking issue(s) found. Please correct the doctor-entry fields before continuing."
     elif warnings:
         output_note = f"{len(warnings)} review warning(s) found. You may continue, but review is recommended."
+    elif infos:
+        output_note = f"{len(infos)} informational note(s). No review warning was detected."
     else:
         output_note = "No blocking issue was detected."
 
+    box_class = "agent-output-box"
+    if status == "warning":
+        box_class += " warn"
+    elif status == "block":
+        box_class += " block"
+
     html_out = (
-        '<div class="agent-output-box">'
+        f'<div class="{box_class}">'
         f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
         f'<div>{escape(summary)}</div>'
         f'<div class="agent-hidden-details-note">{escape(output_note)}</div>'
