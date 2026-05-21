@@ -3862,20 +3862,14 @@ elif st.session_state.page == 3:
             st.markdown('<div class="mini-status"><b>Ready when you are</b><br><span style="color:#5a7060;font-size:.84rem">Start with Part I line (a). No warnings are shown before typing.</span></div>', unsafe_allow_html=True)
         else:
             if blocking_issues:
-                st.markdown('<div class="mini-status"><b style="color:#c0392b">Review needed before coding</b><br><span style="color:#5a7060;font-size:.84rem">Fix the messages shown under each field.</span></div>', unsafe_allow_html=True)
+                st.markdown('<div class="mini-status"><b style="color:#c0392b">Review needed before coding</b><br><span style="color:#5a7060;font-size:.84rem">Fix the messages shown under each field before starting the agent workflow.</span></div>', unsafe_allow_html=True)
             elif nonblocking_issues:
-                st.markdown('<div class="mini-status"><b style="color:#a66a00">Coding possible, review suggested</b><br><span style="color:#5a7060;font-size:.84rem">Warnings are shown under the relevant field.</span></div>', unsafe_allow_html=True)
+                st.markdown('<div class="mini-status"><b style="color:#a66a00">Coding possible, review suggested</b><br><span style="color:#5a7060;font-size:.84rem">Warnings are shown under the relevant field. SP/WHO/TABB checks will appear only in Agent 3.</span></div>', unsafe_allow_html=True)
             else:
-                st.markdown('<div class="mini-status"><b style="color:#006940">Ready for coding</b><br><span style="color:#5a7060;font-size:.84rem">No live warnings detected.</span></div>', unsafe_allow_html=True)
+                st.markdown('<div class="mini-status"><b style="color:#006940">Ready for agent workflow</b><br><span style="color:#5a7060;font-size:.84rem">No live form warnings detected. Press Review & Find Codes to start Agent 1.</span></div>', unsafe_allow_html=True)
 
-            if tentative:
-                if sp_info.get("confirmed"):
-                    st.markdown(f'<div class="muted-box"><b style="color:#006940">Tentative UCOD</b><br>{escape(tentative.get("cause", "—"))}</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="muted-box"><b style="color:#a66a00">Tentative UCOD</b><br>Not confirmed until sequence review</div>', unsafe_allow_html=True)
-            if sp_info.get("rule"):
-                st.markdown(f'<div class="muted-box"><b>{escape(sp_info.get("rule", ""))}: {escape(sp_info.get("title", ""))}</b><br><span style="font-size:.82rem;color:#5a7060">{escape(sp_info.get("message", ""))}</span></div>', unsafe_allow_html=True)
-            st.caption("Full ICD coding runs on the Review & Coding page.")
+            st.markdown('<div class="muted-box"><b style="color:#006940">Sequential agents</b><br><span style="font-size:.82rem;color:#5a7060">Agent 1 checks input. Agent 2 retrieves and validates ICD candidates. Agent 3 applies WHO/SP and TABB logic. No SP result is shown on this doctor-entry page.</span></div>', unsafe_allow_html=True)
+            st.caption("SP/UCOD reasoning appears only inside the Mortality Sequence / WHO Rules Agent.")
 
     b1, b2, _ = st.columns([1, 1.8, 5.5])
     with b1:
