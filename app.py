@@ -300,12 +300,55 @@ section[data-testid="stSidebar"] .stTextInput input {
 }
 /* Smaller action buttons for the sequential agent workspace. */
 div[data-testid="stButton"] > button {
-  padding: .38rem .85rem !important;
-  font-size: .82rem !important;
-  min-height: 2.15rem !important;
+  padding: .32rem .72rem !important;
+  font-size: .78rem !important;
+  min-height: 1.95rem !important;
   border-radius: 8px !important;
-  line-height: 1.2 !important;
+  line-height: 1.15 !important;
+  width: auto !important;
 }
+.agent2-code-list {
+  margin-top: .7rem;
+  display: grid;
+  gap: .6rem;
+}
+.agent2-code-item {
+  background:#f8faf8;
+  border:1px solid #e2eee5;
+  border-radius:12px;
+  padding:.7rem .8rem;
+}
+.agent2-code-line {
+  font-weight:850;
+  color:var(--green);
+  font-size:.82rem;
+  margin-bottom:.15rem;
+}
+.agent2-code-cause {
+  font-weight:800;
+  color:#1a2e1a;
+  margin-bottom:.25rem;
+}
+.agent2-selected-code {
+  background:#ffffff;
+  border-left:4px solid var(--green);
+  padding:.42rem .55rem;
+  border-radius:8px;
+  font-size:.82rem;
+  margin:.35rem 0;
+}
+.agent2-top3 {
+  font-size:.78rem;
+  color:#35463a;
+  margin-top:.35rem;
+  line-height:1.45;
+}
+.agent2-top3 b { color:#1a2e1a; }
+.agent2-top3 ol {
+  margin:.25rem 0 0 1.1rem;
+  padding:0;
+}
+.agent2-top3 li { margin:.16rem 0; }
 
 .agent-button-hint {
   color: var(--muted);
@@ -533,7 +576,6 @@ st.markdown("""
     <p>Ministry of Health | Kingdom of Saudi Arabia</p>
     <p style="font-size:.76rem;opacity:.72">Claude extraction + file-only ICD coding</p>
   </div>
-  <div class="moh-emblem">MOH<br>KSA<br>Death<br>Cert</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3690,6 +3732,7 @@ def agent2_candidate_validation_with_llm(api_key: str, coded_results: Dict, pati
     llm["status"] = status
     llm["blocking"] = has_error
     llm["rule_issues"] = issues
+    llm["coded_causes_compact"] = compact
     llm["condition_to_continue"] = fallback["condition_to_continue"]
     return llm
 
@@ -3941,6 +3984,87 @@ def render_agent_result(result: Dict, step: int, title: str, waiting_text: str =
     )
     st.markdown(html_out, unsafe_allow_html=True)
 
+def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> None:
+    '''Agent 2 output card: selected ICD for every Part I/Part II input + top 3 retrieved candidates.'''
+    if not result:
+        st.markdown(
+            '<div class="agent-output-box">'
+            '<div class="agent-kicker">AGENT 2</div>'
+            '<div class="agent-title">ICD Candidate Validation Agent</div>'
+            '<div class="agent-hidden-details-note">Run Agent 2 to retrieve and select ICD codes for all Part I and Part II entries.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    status = str(result.get("status", "warning")).lower()
+    status_label = {"pass": "PASSED", "warning": "REVIEW SUGGESTED", "block": "BLOCKED"}.get(status, status.upper())
+    status_class = "block" if status == "block" else ("warn" if status == "warning" else "")
+    box_class = "agent-output-box" + (" warn" if status == "warning" else (" block" if status == "block" else ""))
+    summary = str(result.get("summary", "ICD retrieval and candidate validation completed.") or "ICD retrieval and candidate validation completed.")
+
+    coded_causes = []
+    if coded_results:
+        coded_causes = coded_results.get("coded_causes", []) or []
+    if not coded_causes:
+        coded_causes = result.get("coded_causes_compact", []) or []
+
+    items_html = []
+    for item in coded_causes:
+        line = escape(item.get("line", ""))
+        role = escape(item.get("role", ""))
+        cause = escape(item.get("cause", ""))
+        selected_code = escape(item.get("code_formatted", item.get("selected_code", "")))
+        selected_desc = escape(item.get("short_desc", ""))
+        status_txt = escape(item.get("selection_status", ""))
+
+        cand_source = item.get("candidates", []) or item.get("top_candidates", []) or []
+        top_rows = []
+        for c in cand_source[:3]:
+            c_code = escape(c.get("code_formatted", c.get("code", "")))
+            c_desc = escape(c.get("short_desc", ""))
+            c_score = c.get("score", "")
+            try:
+                score_txt = f" — score {float(c_score):.2f}"
+            except Exception:
+                score_txt = ""
+            top_rows.append(f"<li><b>{c_code}</b> — {c_desc}{escape(score_txt)}</li>")
+        top_html = "".join(top_rows) if top_rows else "<li>No retrieved candidates shown.</li>"
+
+        items_html.append(f'''
+        <div class="agent2-code-item">
+          <div class="agent2-code-line">Line {line} · {role}</div>
+          <div class="agent2-code-cause">{cause}</div>
+          <div class="agent2-selected-code"><b>Selected ICD:</b> {selected_code} — {selected_desc}<br><span class="agent-hidden-details-note">Status: {status_txt}</span></div>
+          <div class="agent2-top3"><b>Top 3 retrieved candidates:</b><ol>{top_html}</ol></div>
+        </div>
+        ''')
+
+    if not items_html:
+        items_html.append('<div class="agent-hidden-details-note">No ICD-coded causes are available yet.</div>')
+
+    issues = result.get("issues", []) or result.get("rule_issues", []) or []
+    errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "error"]
+    warnings = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "warning"]
+    if errors:
+        note = f"{len(errors)} blocking ICD issue(s) found."
+    elif warnings:
+        note = f"{len(warnings)} ICD review warning(s) found."
+    else:
+        note = "All entered Part I/Part II causes have selected ICD codes."
+
+    html_out = f'''
+    <div class="{box_class}">
+      <div class="agent-kicker">AGENT 2</div>
+      <div class="agent-title">ICD Candidate Validation Agent</div>
+      <div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>
+      <div>{escape(summary)}</div>
+      <div class="agent-hidden-details-note">{escape(note)}</div>
+      <div class="agent2-code-list">{''.join(items_html)}</div>
+    </div>
+    '''
+    st.markdown(html_out, unsafe_allow_html=True)
+
 def render_agent3_result(result: Dict) -> None:
     """Agent 3 output card: title + SP rule + selected line + UCOD explanation in one square."""
     if not result:
@@ -4030,7 +4154,6 @@ def render_agent_prompt_box(prompt_text: str) -> None:
 
 def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
     """Left-side editable doctor panel used on the agent workflow page."""
-    st.markdown('<div class="doctor-edit-panel">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Doctor Editable Certificate Fields</div>', unsafe_allow_html=True)
     st.caption("The doctor can modify these fields at any time. After changes, click Save Changes & Reset Agents.")
 
@@ -4097,7 +4220,6 @@ def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
             st.session_state.page = 3
             st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
     return part1_chain, part2_conditions
 
 def render_compact_coded_causes(coded_causes: List[Dict]) -> None:
@@ -4500,7 +4622,7 @@ elif st.session_state.page == 4:
         st.session_state.agent_step = 1
 
     st.markdown('<div class="section-title">Review & Coding — Sequential LLM Agents</div>', unsafe_allow_html=True)
-    st.caption("The doctor edits the certificate on the left. The right side shows one agent at a time with a compact output only.")
+    # Compact workflow page header only; explanatory caption removed for cleaner UI.
 
     left, right = st.columns([1.35, 1.0], gap="large")
 
@@ -4607,7 +4729,7 @@ elif st.session_state.page == 4:
             )
             render_agent_prompt_box(AGENT2_SYSTEM_PROMPT)
 
-            render_agent_result(st.session_state.get("agent2_result"), 2, "ICD Candidate Validation Agent", "Run Agent 2 to retrieve and select ICD codes.")
+            render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
 
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
