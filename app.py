@@ -695,6 +695,26 @@ TABB_RULES_CSV_PATHS = [
     "/mnt/data/tabb_rules(1).csv",
 ]
 
+# Optional local TABA file. In Streamlit Cloud, place taba_rules.csv beside this app file.
+# TABA is the causal acceptability table used for Part I sequence checks.
+TABA_RULES_CSV_PATHS = [
+    "taba_rules.csv",
+    "taba_rule.csv",
+    "TABA_rules.csv",
+    "TABA_rule.csv",
+    "taba_rules(1).csv",
+    os.path.join(os.getcwd(), "taba_rules.csv"),
+    os.path.join(os.getcwd(), "taba_rule.csv"),
+    os.path.join(os.getcwd(), "TABA_rules.csv"),
+    os.path.join(os.getcwd(), "TABA_rule.csv"),
+    os.path.join(os.getcwd(), "taba_rules(1).csv"),
+    "/mnt/data/taba_rules.csv",
+    "/mnt/data/taba_rule.csv",
+    "/mnt/data/TABA_rules.csv",
+    "/mnt/data/TABA_rule.csv",
+    "/mnt/data/taba_rules(1).csv",
+]
+
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".icd10_hybrid_cache_v1")
 EMBED_MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
@@ -3334,7 +3354,7 @@ def quality_from_sp_and_validation(coded_causes: List[Dict], validation: Dict, s
 
 
 # =============================================================================
-# Three LLM Agent Workflow + TABB support
+# Three LLM Agent Workflow + TABA/TABB support
 # =============================================================================
 AGENT1_SYSTEM_PROMPT = """
 You are Agent 1: Input Validation Agent for an electronic death certificate.
@@ -3391,7 +3411,7 @@ AGENT3_SYSTEM_PROMPT = """
 You are Agent 3: Mortality Sequence / WHO Rules Agent for an electronic death certificate.
 
 Task:
-Review the final Part I causal sequence, SP1-SP8 starting-point logic, TABB rule matches, and the UCOD decision.
+Review the final Part I causal sequence, SP1-SP8 starting-point logic, TABA causal acceptability, TABB rule matches, and the UCOD decision.
 
 Strict rules:
 - Use only certificate causes and ICD codes already selected.
@@ -3678,6 +3698,223 @@ def run_tabb_certificate_check(tabb_df: pd.DataFrame, coded_causes: List[Dict], 
         "summary": summary,
     }
 
+
+@st.cache_resource(show_spinner=False)
+def load_taba_rules() -> pd.DataFrame:
+    """
+    Load local TABA CSV if available.
+
+    Expected CSV columns:
+    - anchor_start, anchor_end: the upper Part I condition/range
+    - cause_start, cause_end: the lower Part I condition/range that can explain it
+    - modifier, raw_line: optional trace/debug columns
+
+    TABA is used for causal acceptability:
+    Can the lower Part I condition cause the upper Part I condition?
+    """
+    expected = ["anchor_start", "anchor_end", "cause_start", "cause_end", "modifier", "raw_line"]
+
+    for path in TABA_RULES_CSV_PATHS:
+        try:
+            if path and os.path.exists(path):
+                df = pd.read_csv(path).fillna("")
+                for col in expected:
+                    if col not in df.columns:
+                        df[col] = ""
+
+                df["anchor_start_norm"] = df["anchor_start"].apply(normalize_icd_for_tabb)
+                df["anchor_end_norm"] = df["anchor_end"].apply(normalize_icd_for_tabb)
+                df["cause_start_norm"] = df["cause_start"].apply(normalize_icd_for_tabb)
+                df["cause_end_norm"] = df["cause_end"].apply(normalize_icd_for_tabb)
+                return df
+        except Exception:
+            continue
+
+    return pd.DataFrame(columns=[
+        "anchor_start", "anchor_end", "cause_start", "cause_end", "modifier", "raw_line",
+        "anchor_start_norm", "anchor_end_norm", "cause_start_norm", "cause_end_norm",
+    ])
+
+def query_taba(taba_df: pd.DataFrame, upper_code: str, lower_code: str, max_matches: int = 10) -> Dict:
+    """
+    Query TABA causal acceptability.
+
+    upper_code = the condition above in Part I, e.g., Part I(a)
+    lower_code = the condition below in Part I, e.g., Part I(b)
+
+    The question answered is:
+    Does TABA accept lower_code as a cause/explanation of upper_code?
+    """
+    upper = normalize_icd_for_tabb(upper_code)
+    lower = normalize_icd_for_tabb(lower_code)
+
+    if taba_df is None or taba_df.empty:
+        return {
+            "accepted": None,
+            "reason": "TABA table was not loaded.",
+            "matches": [],
+        }
+
+    if not upper or not lower:
+        return {
+            "accepted": None,
+            "reason": "Missing upper or lower ICD code for TABA check.",
+            "matches": [],
+        }
+
+    # First find the TABA anchor block for the upper condition.
+    anchor_rows = taba_df[
+        taba_df.apply(
+            lambda r: code_in_tabb_range(
+                upper,
+                r.get("anchor_start_norm", ""),
+                r.get("anchor_end_norm", ""),
+            ),
+            axis=1,
+        )
+    ]
+
+    if anchor_rows.empty:
+        return {
+            "accepted": False,
+            "reason": f"No TABA anchor/range found for upper code {upper_code}.",
+            "matches": [],
+        }
+
+    # Then check whether the lower condition appears under that upper anchor.
+    matched_rows = anchor_rows[
+        anchor_rows.apply(
+            lambda r: code_in_tabb_range(
+                lower,
+                r.get("cause_start_norm", ""),
+                r.get("cause_end_norm", ""),
+            ),
+            axis=1,
+        )
+    ]
+
+    if matched_rows.empty:
+        return {
+            "accepted": False,
+            "reason": f"TABA does not list {lower_code} as an acceptable cause of {upper_code}.",
+            "matches": [],
+        }
+
+    return {
+        "accepted": True,
+        "reason": f"TABA accepts {lower_code} as a cause of {upper_code}.",
+        "matches": matched_rows.head(max_matches).to_dict("records"),
+    }
+
+def check_part1_sequence_with_taba(part1_items: List[Dict], taba_df: pd.DataFrame) -> Dict:
+    """
+    Check adjacent Part I causal links using TABA.
+
+    For:
+    Part I(a): Cerebrovascular stroke
+    Part I(b): Hypertension
+    Part I(c): Diabetes
+
+    The function checks:
+    b -> a
+    c -> b
+    """
+    filled = [
+        x for x in part1_items
+        if str(x.get("code_formatted", "") or "").strip()
+    ]
+
+    links = []
+    all_accepted = True
+    uncertain = False
+
+    if len(filled) <= 1:
+        return {
+            "available": bool(taba_df is not None and not taba_df.empty),
+            "valid_sequence": True,
+            "uncertain": False,
+            "links": [],
+            "summary": "Single Part I ICD-coded cause; no adjacent TABA link to check.",
+        }
+
+    for upper, lower in zip(filled, filled[1:]):
+        upper_code = str(upper.get("code_formatted", "") or "").strip()
+        lower_code = str(lower.get("code_formatted", "") or "").strip()
+
+        result = query_taba(
+            taba_df=taba_df,
+            upper_code=upper_code,
+            lower_code=lower_code,
+        )
+
+        accepted = result.get("accepted")
+        if accepted is None:
+            uncertain = True
+            all_accepted = False
+        elif accepted is False:
+            all_accepted = False
+
+        links.append({
+            "upper_line": upper.get("line", ""),
+            "upper_cause": upper.get("cause", ""),
+            "upper_code": upper_code,
+            "lower_line": lower.get("line", ""),
+            "lower_cause": lower.get("cause", ""),
+            "lower_code": lower_code,
+            "accepted": accepted,
+            "reason": result.get("reason", ""),
+            "matches": result.get("matches", [])[:3],
+        })
+
+    available = bool(taba_df is not None and not taba_df.empty)
+    if not available:
+        summary = "TABA table was not loaded; causal sequence cannot be table-confirmed."
+    elif uncertain:
+        summary = "TABA sequence check is uncertain because one or more ICD links could not be checked."
+    elif all_accepted:
+        summary = "TABA accepts all adjacent Part I causal links."
+    else:
+        summary = "TABA does not accept one or more adjacent Part I causal links."
+
+    return {
+        "available": available,
+        "valid_sequence": bool(all_accepted and not uncertain),
+        "uncertain": uncertain,
+        "links": links,
+        "summary": summary,
+    }
+
+def taba_sequence_issues(taba_sequence: Dict) -> List[Dict]:
+    """Convert TABA link results into Agent 3 review issues."""
+    issues = []
+    if not taba_sequence:
+        return issues
+
+    if not taba_sequence.get("available"):
+        issues.append({
+            "line": "Part I",
+            "severity": "warning",
+            "message": "TABA causal acceptability table was not loaded; Part I sequence was not table-confirmed.",
+        })
+        return issues
+
+    for link in taba_sequence.get("links", []) or []:
+        accepted = link.get("accepted")
+        if accepted is False:
+            issues.append({
+                "line": f"Part I ({link.get('lower_line', '')})",
+                "severity": "warning",
+                "message": link.get("reason", "TABA did not accept this causal link."),
+            })
+        elif accepted is None:
+            issues.append({
+                "line": f"Part I ({link.get('lower_line', '')})",
+                "severity": "warning",
+                "message": link.get("reason", "TABA could not confirm this causal link."),
+            })
+    return issues
+
+
 def apply_tabb_result_to_validation(validation: Dict, tabb_result: Dict) -> Dict:
     out = dict(validation)
     issues = list(out.get("coding_issues", []) or [])
@@ -3800,7 +4037,7 @@ def agent2_candidate_validation_with_llm(api_key: str, coded_results: Dict, pati
         "status": status,
         "summary": "ICD retrieval and candidate validation completed.",
         "issues": issues,
-        "condition_to_continue": "Resolve missing-code errors before mortality sequence review." if has_error else "Doctor may continue to WHO/TABB sequence review.",
+        "condition_to_continue": "Resolve missing-code errors before mortality sequence review." if has_error else "Doctor may continue to WHO + TABA/TABB sequence review.",
     }
 
     payload = {
@@ -3865,7 +4102,7 @@ def agent3_actionable_tabb_issues(tabb_result: Dict) -> List[Dict]:
             })
     return actionable
 
-def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, List[Dict], str]:
+def agent3_sequence_status(sp_review: Dict, tabb_result: Dict, taba_sequence: Optional[Dict] = None) -> Tuple[str, List[Dict], str]:
     """Decide Agent 3 status from SP/TABB sequence only, with line-level explanation."""
     issues: List[Dict] = []
     sp_rule = str(sp_review.get("sp_rule", "REVIEW") or "REVIEW").upper()
@@ -3873,12 +4110,21 @@ def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, Lis
     selected_line = str(sp_review.get("selected_line", "") or "").strip()
     selected_code = str(sp_review.get("selected_code", "") or "").strip()
 
+    taba_available = bool(taba_sequence and taba_sequence.get("available"))
+    taba_valid = bool(taba_sequence and taba_sequence.get("valid_sequence"))
+
     sequence_confirmed = (
         sp_rule in {"SP1", "SP2", "SP3"}
         and bool(selected)
         and sp_review.get("needs_manual_review") is False
         and not (sp_review.get("full_sequence_valid") is False and sp_rule == "SP3")
     )
+
+    # When TABA is available and Part I has adjacent links, it is the deterministic
+    # source for causal acceptability. Do not report SP3 as confirmed if TABA rejects
+    # any adjacent Part I link.
+    if sp_rule == "SP3" and taba_available and not taba_valid:
+        sequence_confirmed = False
 
     if sp_rule == "SP4":
         sequence_confirmed = False
@@ -3896,13 +4142,16 @@ def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, Lis
             "message": sp_review.get("explanation", "SP/WHO review could not fully confirm the UCOD starting point."),
         })
 
+    issues.extend(taba_sequence_issues(taba_sequence or {}))
+
     actionable_tabb = agent3_actionable_tabb_issues(tabb_result)
     issues.extend(actionable_tabb)
 
     code_txt = f" ({selected_code})" if selected_code else ""
     line_txt = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (f"line {selected_line}" if selected_line else "no line")
     if sequence_confirmed and not actionable_tabb:
-        summary = f"{sp_rule} applied. Selected UCOD starting point: {line_txt} — {selected}{code_txt}."
+        table_note = " TABA confirmed the Part I causal links." if taba_available and taba_valid and sp_rule == "SP3" else ""
+        summary = f"{sp_rule} applied. Selected UCOD starting point: {line_txt} — {selected}{code_txt}.{table_note}"
         return "pass", [], summary
 
     if selected:
@@ -3912,7 +4161,7 @@ def agent3_sequence_status(sp_review: Dict, tabb_result: Dict) -> Tuple[str, Lis
     return "warning", issues, summary
 
 
-def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame) -> Dict:
+def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame, taba_df: Optional[pd.DataFrame] = None) -> Dict:
     concepts = coded_results.get("concepts", {}) or {}
     coded_causes = coded_results.get("coded_causes", []) or []
     validation = coded_results.get("validation", {}) or {}
@@ -3921,11 +4170,18 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     sp_review = apply_sp_engine(api_key, concepts, coded_causes)
     validation = apply_sp_result_to_validation(validation, sp_review, coded_causes)
 
-    # TABB is checked, but coding-quality warnings from Agent 2 should not make
-    # Agent 3 fail. Agent 3 status is based only on sequence/SP/TABB actionability.
-    tabb_result = run_tabb_certificate_check(tabb_df, coded_causes, sp_review, validation)
-    agent3_status, rule_issues, agent3_summary = agent3_sequence_status(sp_review, tabb_result)
+    part1_items_for_taba = [
+        x for x in coded_causes
+        if x.get("role") in {"immediate", "contributing", "underlying"}
+    ]
 
+    # TABA validates adjacent Part I causal links. TABB checks SP6/SP7 and
+    # modification/linkage/specificity actionability after a UCOD candidate exists.
+    taba_sequence = check_part1_sequence_with_taba(part1_items_for_taba, taba_df)
+    tabb_result = run_tabb_certificate_check(tabb_df, coded_causes, sp_review, validation)
+    agent3_status, rule_issues, agent3_summary = agent3_sequence_status(sp_review, tabb_result, taba_sequence)
+
+    validation["taba_sequence"] = taba_sequence
     validation["tabb_result"] = tabb_result
     validation["agent3_sequence_status"] = agent3_status
     validation["agent3_sequence_summary"] = agent3_summary
@@ -3962,9 +4218,10 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
             for x in coded_causes
         ],
         "sp_review": sp_review,
+        "taba_sequence": taba_sequence,
         "tabb_result": tabb_result,
         "agent3_rule_issues": rule_issues,
-        "instruction": "Explain only the mortality sequence / SP / TABB result. Do not repeat Agent 2 coding-quality warnings unless they directly change UCOD selection.",
+        "instruction": "Explain only the mortality sequence / SP / TABA/TABB result. Do not repeat Agent 2 coding-quality warnings unless they directly change UCOD selection.",
     }
     llm = call_claude_json(api_key, AGENT3_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2), max_tokens=800, fallback=fallback)
     if not isinstance(llm, dict):
@@ -3979,6 +4236,7 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     llm["rule_issues"] = rule_issues
     llm["issues"] = rule_issues
     llm["sp_review"] = sp_review
+    llm["taba_sequence"] = taba_sequence
     llm["tabb_result"] = tabb_result
     llm["validation"] = validation
     llm["condition_to_continue"] = fallback["condition_to_continue"]
@@ -3997,7 +4255,7 @@ def render_agent_stepper(current_step: int) -> None:
     labels = [
         (1, "Input"),
         (2, "Retrieval"),
-        (3, "WHO/TABB"),
+        (3, "WHO + TABA/TABB"),
     ]
     html_pills = []
     for num, label in labels:
@@ -4169,6 +4427,7 @@ def render_agent3_result(result: Dict) -> None:
     box_class = "agent-output-box" + (" warn" if status == "warning" else (" block" if status == "block" else ""))
 
     sp = result.get("sp_review", {}) or {}
+    taba = result.get("taba_sequence", {}) or {}
     tabb = result.get("tabb_result", {}) or {}
     summary = str(result.get("summary", "Agent completed its review.") or "Agent completed its review.")
     sp_rule = str(sp.get("sp_rule", "Not available") or "Not available")
@@ -4186,12 +4445,20 @@ def render_agent3_result(result: Dict) -> None:
         line_display = "Not selected"
 
     links = []
-    for link in sp.get("causal_links", []) or []:
-        valid = link.get("valid")
-        mark = "✓" if valid is True else ("⚠" if valid is None else "✗")
-        links.append(
-            f"{mark} line ({escape(link.get('from_lower_line',''))}) → line ({escape(link.get('to_upper_line',''))}): {escape(link.get('reason',''))}"
-        )
+    if taba.get("links"):
+        for link in taba.get("links", []) or []:
+            accepted = link.get("accepted")
+            mark = "✓" if accepted is True else ("⚠" if accepted is None else "✗")
+            links.append(
+                f"{mark} Part I ({escape(link.get('lower_line',''))}) → Part I ({escape(link.get('upper_line',''))}): {escape(link.get('reason',''))}"
+            )
+    else:
+        for link in sp.get("causal_links", []) or []:
+            valid = link.get("valid")
+            mark = "✓" if valid is True else ("⚠" if valid is None else "✗")
+            links.append(
+                f"{mark} line ({escape(link.get('from_lower_line',''))}) → line ({escape(link.get('to_upper_line',''))}): {escape(link.get('reason',''))}"
+            )
     links_html = ""
     if links:
         links_html = '<div class="agent-sp-links"><b>Line checks:</b><br>' + "<br>".join(links[:4]) + "</div>"
@@ -4206,6 +4473,15 @@ def render_agent3_result(result: Dict) -> None:
                 rows.append(f"⚠ {line}: {msg}" if line else f"⚠ {msg}")
         if rows:
             issue_html = '<div class="agent-sp-issues"><b>Why review?</b><br>' + "<br>".join(rows) + "</div>"
+
+    taba_text = "TABA loaded" if taba.get("available") else "TABA not loaded"
+    if taba.get("links"):
+        if taba.get("valid_sequence"):
+            taba_text += "; causal sequence accepted"
+        else:
+            taba_text += "; one or more causal links not accepted"
+    else:
+        taba_text += "; no adjacent link to check"
 
     tabb_text = "TABB loaded" if tabb.get("available") else "TABB not loaded"
     if tabb.get("matches") or tabb.get("reverse_matches"):
@@ -4226,6 +4502,7 @@ def render_agent3_result(result: Dict) -> None:
         f'<div><b>Selected ICD</b><br>{escape(selected_code or "Pending/none")}</div>'
         f'</div>'
         f'<div class="agent-hidden-details-note"><b>Reason:</b> {escape(explanation or summary)}</div>'
+        f'<div class="agent-hidden-details-note"><b>TABA:</b> {escape(taba_text)}</div>'
         f'<div class="agent-hidden-details-note"><b>TABB:</b> {escape(tabb_text)}</div>'
         f'{links_html}'
         f'{issue_html}'
@@ -4873,13 +5150,15 @@ elif st.session_state.page == 4:
 
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
-                if st.button("Run Agent 3 — WHO / TABB Review", type="primary"):
-                    with st.spinner("Agent 3 is reviewing SP rules and TABB code relationships..."):
+                if st.button("Run Agent 3 — WHO + TABA/TABB Review", type="primary"):
+                    with st.spinner("Agent 3 is reviewing SP rules, TABA causal links, and TABB code relationships..."):
                         tabb_df = load_tabb_rules()
+                        taba_df = load_taba_rules()
                         st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
                             API_KEY,
                             st.session_state.icd_results,
                             tabb_df,
+                            taba_df,
                         )
                         st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
                             "validation",
