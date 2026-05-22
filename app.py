@@ -3417,7 +3417,10 @@ Strict rules:
 - Use only certificate causes and ICD codes already selected.
 - Do not invent diseases or ICD codes.
 - Explain whether the selected starting point / UCOD is acceptable.
-- If TABB or SP logic indicates uncertainty, require manual review.
+- TABA is the authority for adjacent Part I causal acceptability checks.
+- TABB is a separate SP6/SP7 and modification-rule table; do not describe TABB as confirming or rejecting the Part I causal sequence.
+- If TABA rejects the Part I sequence, require manual review even if a tentative UCOD candidate exists.
+- If TABB finds an actionable linkage/specificity/direct-sequela/trivial rule, report it separately.
 - Return concise doctor-facing guidance.
 - Return only valid JSON.
 
@@ -3735,6 +3738,29 @@ def load_taba_rules() -> pd.DataFrame:
         "anchor_start_norm", "anchor_end_norm", "cause_start_norm", "cause_end_norm",
     ])
 
+def icd_parent_variants_for_taba(code: str) -> List[str]:
+    """
+    Return ICD variants from most specific to broadest parent category.
+
+    This helps when the ICD row selected by Agent 2 is ICD-10-CM-like
+    or highly specific, while TABA may use WHO-style parent categories.
+
+    Example:
+    H40.059 -> H40059, H4005, H400, H40
+    E11.3211 -> E113211, E11321, E1132, E113, E11
+    """
+    c = normalize_icd_for_tabb(code)
+    if not c:
+        return []
+
+    variants = [c]
+    while len(c) > 3:
+        c = c[:-1]
+        if len(c) >= 3 and c not in variants:
+            variants.append(c)
+    return variants
+
+
 def query_taba(taba_df: pd.DataFrame, upper_code: str, lower_code: str, max_matches: int = 10) -> Dict:
     """
     Query TABA causal acceptability.
@@ -3753,6 +3779,8 @@ def query_taba(taba_df: pd.DataFrame, upper_code: str, lower_code: str, max_matc
             "accepted": None,
             "reason": "TABA table was not loaded.",
             "matches": [],
+            "used_upper_code": upper_code,
+            "used_lower_code": lower_code,
         }
 
     if not upper or not lower:
@@ -3760,50 +3788,83 @@ def query_taba(taba_df: pd.DataFrame, upper_code: str, lower_code: str, max_matc
             "accepted": None,
             "reason": "Missing upper or lower ICD code for TABA check.",
             "matches": [],
+            "used_upper_code": upper_code,
+            "used_lower_code": lower_code,
         }
 
+    upper_variants = icd_parent_variants_for_taba(upper_code)
+    lower_variants = icd_parent_variants_for_taba(lower_code)
+
+    anchor_rows = pd.DataFrame()
+    used_upper = upper
+
     # First find the TABA anchor block for the upper condition.
-    anchor_rows = taba_df[
-        taba_df.apply(
-            lambda r: code_in_tabb_range(
-                upper,
-                r.get("anchor_start_norm", ""),
-                r.get("anchor_end_norm", ""),
-            ),
-            axis=1,
-        )
-    ]
+    # Try the exact/specific code first, then parent categories if needed.
+    for u in upper_variants:
+        candidate_rows = taba_df[
+            taba_df.apply(
+                lambda r: code_in_tabb_range(
+                    u,
+                    r.get("anchor_start_norm", ""),
+                    r.get("anchor_end_norm", ""),
+                ),
+                axis=1,
+            )
+        ]
+        if not candidate_rows.empty:
+            anchor_rows = candidate_rows
+            used_upper = u
+            break
 
     if anchor_rows.empty:
+        tried = ", ".join(upper_variants[:6])
         return {
             "accepted": False,
-            "reason": f"No TABA anchor/range found for upper code {upper_code}.",
+            "reason": f"No TABA anchor/range found for upper code {upper_code}. Tried normalized/parent forms: {tried}.",
             "matches": [],
+            "used_upper_code": upper_code,
+            "used_lower_code": lower_code,
         }
 
     # Then check whether the lower condition appears under that upper anchor.
-    matched_rows = anchor_rows[
-        anchor_rows.apply(
-            lambda r: code_in_tabb_range(
-                lower,
-                r.get("cause_start_norm", ""),
-                r.get("cause_end_norm", ""),
-            ),
-            axis=1,
-        )
-    ]
+    matched_rows = pd.DataFrame()
+    used_lower = lower
+    for l in lower_variants:
+        candidate_matches = anchor_rows[
+            anchor_rows.apply(
+                lambda r: code_in_tabb_range(
+                    l,
+                    r.get("cause_start_norm", ""),
+                    r.get("cause_end_norm", ""),
+                ),
+                axis=1,
+            )
+        ]
+        if not candidate_matches.empty:
+            matched_rows = candidate_matches
+            used_lower = l
+            break
 
     if matched_rows.empty:
+        tried = ", ".join(lower_variants[:6])
         return {
             "accepted": False,
-            "reason": f"TABA does not list {lower_code} as an acceptable cause of {upper_code}.",
+            "reason": f"TABA does not list {lower_code} as an acceptable cause of {upper_code}. Tried lower-code forms: {tried}.",
             "matches": [],
+            "used_upper_code": used_upper,
+            "used_lower_code": lower_code,
         }
+
+    parent_note = ""
+    if used_upper != upper or used_lower != lower:
+        parent_note = f" (matched using normalized/parent forms {used_lower} → {used_upper})"
 
     return {
         "accepted": True,
-        "reason": f"TABA accepts {lower_code} as a cause of {upper_code}.",
+        "reason": f"TABA accepts {lower_code} as a cause of {upper_code}{parent_note}.",
         "matches": matched_rows.head(max_matches).to_dict("records"),
+        "used_upper_code": used_upper,
+        "used_lower_code": used_lower,
     }
 
 def check_part1_sequence_with_taba(part1_items: List[Dict], taba_df: pd.DataFrame) -> Dict:
@@ -4154,8 +4215,29 @@ def agent3_sequence_status(sp_review: Dict, tabb_result: Dict, taba_sequence: Op
         summary = f"{sp_rule} applied. Selected UCOD starting point: {line_txt} — {selected}{code_txt}.{table_note}"
         return "pass", [], summary
 
+    taba_has_links = bool(taba_sequence and taba_sequence.get("links"))
+    taba_failed = bool(taba_available and taba_has_links and not taba_valid)
+
     if selected:
-        summary = f"{sp_rule} selected {line_txt} — {selected}{code_txt}, but review is suggested because the full sequence or TABB actionability was not fully confirmed."
+        if taba_failed:
+            if actionable_tabb:
+                tabb_note = " TABB was checked separately and found actionable post-selection rule(s) that also require review."
+            else:
+                tabb_note = " TABB was checked separately for post-selection modification and did not provide an actionable change."
+            summary = (
+                f"REVIEW: {line_txt} — {selected}{code_txt} is retained only as a tentative review candidate because "
+                f"TABA did not accept the Part I causal sequence.{tabb_note}"
+            )
+        elif actionable_tabb:
+            summary = (
+                f"REVIEW: {sp_rule} selected {line_txt} — {selected}{code_txt}, but TABB found actionable "
+                f"post-selection rule(s) requiring review."
+            )
+        else:
+            summary = (
+                f"REVIEW: {sp_rule} selected {line_txt} — {selected}{code_txt}, but SP/WHO logic did not fully confirm "
+                f"the UCOD starting point."
+            )
     else:
         summary = "SP/WHO could not select a reliable UCOD starting point from the Part I sequence."
     return "warning", issues, summary
@@ -4437,12 +4519,25 @@ def render_agent3_result(result: Dict) -> None:
     explanation = str(sp.get("explanation", "") or "")
     issues = result.get("issues", []) or result.get("rule_issues", []) or []
 
+    taba_has_links = bool(taba.get("links"))
+    taba_failed = bool(taba.get("available") and taba_has_links and not taba.get("valid_sequence"))
+
+    if taba_failed:
+        sp_rule_display = "Not confirmed — TABA sequence failed"
+    elif status == "warning" and sp_rule.upper() == "REVIEW":
+        sp_rule_display = "Not confirmed — manual review"
+    else:
+        sp_rule_display = sp_rule
+
     if selected_line in {"a", "b", "c", "d"}:
         line_display = f"Part I ({selected_line})"
     elif selected_line:
         line_display = f"Line {selected_line}"
     else:
         line_display = "Not selected"
+
+    if status == "warning" and selected_line:
+        line_display = f"Review candidate: {line_display}"
 
     links = []
     if taba.get("links"):
@@ -4485,9 +4580,9 @@ def render_agent3_result(result: Dict) -> None:
 
     tabb_text = "TABB loaded" if tabb.get("available") else "TABB not loaded"
     if tabb.get("matches") or tabb.get("reverse_matches"):
-        tabb_text += f"; {len(tabb.get('matches', []) or []) + len(tabb.get('reverse_matches', []) or [])} code relationship match(es) found"
+        tabb_text += f"; {len(tabb.get('matches', []) or []) + len(tabb.get('reverse_matches', []) or [])} post-selection relationship match(es) found"
     else:
-        tabb_text += "; no actionable TABB change found"
+        tabb_text += "; no actionable post-selection change found"
 
     html_out = (
         f'<div class="{box_class}">'
@@ -4496,7 +4591,7 @@ def render_agent3_result(result: Dict) -> None:
         f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
         f'<div>{escape(summary)}</div>'
         f'<div class="agent-sp-grid">'
-        f'<div><b>SP rule</b><br>{escape(sp_rule)}</div>'
+        f'<div><b>SP status</b><br>{escape(sp_rule_display)}</div>'
         f'<div><b>Selected line</b><br>{escape(line_display)}</div>'
         f'<div><b>Selected cause</b><br>{escape(selected_cause or "Not selected")}</div>'
         f'<div><b>Selected ICD</b><br>{escape(selected_code or "Pending/none")}</div>'
