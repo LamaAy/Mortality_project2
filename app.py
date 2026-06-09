@@ -3063,16 +3063,19 @@ def deterministic_sp_fallback(part1_chain: List[Dict], part2_conditions: List[Di
 
     if len(part1) == 1:
         x = part1[0]
+        warning = (
+            "Only one Part I line is used. The selected condition is treated as the tentative underlying cause. "
+            "If it is only an immediate mechanism or if multiple diseases were typed in one line, split the sequence into separate Part I lines."
+        )
         return {
-            "sp_rule": "SP2",
-            "selected_line": x["line"],
-            "selected_cause": x["cause"],
-            "full_sequence_valid": None,
-            "partial_sequence_valid": None,
-            "causal_links": [],
-            "warnings": [],
-            "needs_manual_review": False,
-            "explanation": "SP2 applied because only one line is used in Part I.",
+            "base_sp_rule": "SP2", "sp_rule": "SP2", "selected_line": x.get("line", ""), "selected_cause": x.get("cause", ""),
+            "selected_code": x.get("code_formatted", ""), "full_sequence_valid": None,
+            "partial_sequence_valid": None, "causal_links": [],
+            "warnings": [warning],
+            "needs_manual_review": True,
+            "blocking": False,
+            "explanation": "SP2 applied: only one Part I line is used. The first-mentioned condition is the tentative starting point before SP6-SP8 checks.",
+            "rule_path": ["SP2"],
         }
 
     if not part1:
@@ -4485,9 +4488,12 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
             f'<div class="agent2-code-item">'
             f'<div class="agent2-code-line">Line {line} · {role}</div>'
             f'<div class="agent2-code-cause">{cause}</div>'
-            f'<div class="agent2-selected-code"><b>Selected ICD:</b> {selected_code} — {selected_desc}<br>'
-            f'<span class="agent-hidden-details-note">Status: {status_txt}</span></div>'
-            f'<div class="agent2-top3"><b>Top 3 retrieved candidates:</b><ol>{top_html}</ol></div>'
+            f'<div class="agent2-selected-code">'
+            f'<b>Excel/local ICD selection:</b> {selected_code} — {selected_desc}<br>'
+            f'<span class="agent-hidden-details-note"><b>Local source:</b> ICD Excel/retrieval file; Status: {status_txt}</span>'
+            f'{who_html}'
+            f'</div>'
+            f'<div class="agent2-top3"><b>Excel/local top 3 retrieved candidates:</b><ol>{top_html}</ol></div>'
             f'</div>'
         )
 
@@ -4539,6 +4545,10 @@ def render_agent3_result(result: Dict) -> None:
     tabb = result.get("tabb_result", {}) or {}
     summary = str(result.get("summary", "Step completed its review.") or "Step completed its review.")
     sp_rule = str(sp.get("sp_rule", "Not available") or "Not available")
+    base_sp_rule = str(sp.get("base_sp_rule", sp_rule) or sp_rule)
+    rule_path = sp.get("rule_path", [base_sp_rule]) or [base_sp_rule]
+    quality = sp.get("sp7_sp8_quality", {}) or {}
+    doctor_action = str(sp.get("doctor_action", "") or "")
     selected_line = str(sp.get("selected_line", "") or "")
     selected_cause = str(sp.get("selected_cause", "") or "")
     selected_code = str(sp.get("selected_code", "") or "")
@@ -4553,7 +4563,15 @@ def render_agent3_result(result: Dict) -> None:
     elif status == "warning" and sp_rule.upper() == "REVIEW":
         sp_rule_display = "Not confirmed — manual review"
     else:
-        sp_rule_display = sp_rule
+        sp_rule_display = " → ".join([str(x) for x in rule_path]) if rule_path else sp_rule
+
+    base_rule_note = ""
+    if base_sp_rule == "SP1":
+        base_rule_note = "SP1 applied first: only one condition was entered, so the same condition is treated as both immediate and tentative underlying cause before SP6-SP8 checks."
+    elif base_sp_rule == "SP2":
+        base_rule_note = "SP2 applied first: only one Part I line is used, so that line is the tentative starting point before SP6-SP8 checks."
+    elif base_sp_rule in {"SP3", "SP4", "SP5"}:
+        base_rule_note = f"{base_sp_rule} applied from Table A sequence logic before SP6-SP8 checks."
 
     if selected_line in {"a", "b", "c", "d"}:
         line_display = f"Part I ({selected_line})"
@@ -4610,6 +4628,13 @@ def render_agent3_result(result: Dict) -> None:
     else:
         tabb_text += "; no actionable post-selection change found"
 
+    quality_text = (
+        f"SP7 ill-defined: {'YES' if quality.get('sp7_ill_defined') else 'No'}; "
+        f"SP8 unlikely/unacceptable: {'YES' if quality.get('sp8_unlikely_or_unacceptable') else 'No'}"
+        if quality else "SP7/SP8 quality check not available yet"
+    )
+    action_html = f'<div class="agent-sp-issues"><b>Doctor action:</b><br>{escape(doctor_action)}</div>' if doctor_action else ''
+
     html_out = (
         f'<div class="{box_class}">'
         f'<div class="agent-kicker">TABLE A/B RULE TRACE</div>'
@@ -4617,16 +4642,20 @@ def render_agent3_result(result: Dict) -> None:
         f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
         f'<div>{escape(summary)}</div>'
         f'<div class="agent-sp-grid">'
-        f'<div><b>SP status</b><br>{escape(sp_rule_display)}</div>'
+        f'<div><b>Rule path</b><br>{escape(sp_rule_display)}</div>'
+        f'<div><b>Base SP rule</b><br>{escape(base_sp_rule)}</div>'
         f'<div><b>Selected line</b><br>{escape(line_display)}</div>'
         f'<div><b>Selected cause</b><br>{escape(selected_cause or "Not selected")}</div>'
         f'<div><b>Selected ICD</b><br>{escape(selected_code or "Pending/none")}</div>'
+        f'<div><b>SP7/SP8 validity</b><br>{escape(quality_text)}</div>'
         f'</div>'
-        f'<div class="agent-hidden-details-note"><b>Reason:</b> {escape(explanation or summary)}</div>'
+        f'<div class="agent-hidden-details-note"><b>Why selected:</b> {escape(base_rule_note or explanation or summary)}</div>'
+        f'<div class="agent-hidden-details-note"><b>Full reason:</b> {escape(explanation or summary)}</div>'
         f'<div class="agent-hidden-details-note"><b>TABA:</b> {escape(taba_text)}</div>'
         f'<div class="agent-hidden-details-note"><b>TABB:</b> {escape(tabb_text)}</div>'
         f'{links_html}'
         f'{issue_html}'
+        f'{action_html}'
         f'</div>'
     )
     st.markdown(html_out, unsafe_allow_html=True)
@@ -4936,11 +4965,17 @@ def apply_sp1_to_sp5_with_taba(coded_causes: List[Dict], taba_df: pd.DataFrame) 
 
     if len(conditions) == 1:
         x = conditions[0]
+        warning = (
+            "Only one condition was entered. SP1 selects this same condition as both the immediate cause "
+            "and the tentative underlying cause. If another disease or injury led to it, add that cause in Part I below line (a)."
+        )
         return {
-            "sp_rule": "SP1", "selected_line": x.get("line", ""), "selected_cause": x.get("cause", ""),
+            "base_sp_rule": "SP1", "sp_rule": "SP1", "selected_line": x.get("line", ""), "selected_cause": x.get("cause", ""),
             "selected_code": x.get("code_formatted", ""), "full_sequence_valid": None,
-            "partial_sequence_valid": None, "causal_links": [], "warnings": [], "needs_manual_review": False,
-            "explanation": "SP1 applied: only one condition is reported on the certificate.",
+            "partial_sequence_valid": None, "causal_links": [], "warnings": [warning], "needs_manual_review": True,
+            "blocking": False,
+            "explanation": "SP1 applied: only one condition is reported, so it is treated as both the immediate cause and the tentative underlying cause before SP6-SP8 quality checks.",
+            "rule_path": ["SP1"],
         }
 
     if len(part1) == 1:
@@ -4970,11 +5005,13 @@ def apply_sp1_to_sp5_with_taba(coded_causes: List[Dict], taba_df: pd.DataFrame) 
     if bool(taba_seq.get("available")) and bottom_checks and all(x.get("accepted") is True for x in bottom_checks):
         selected = part1[-1]
         return {
-            "sp_rule": "SP3", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
+            "base_sp_rule": "SP3", "sp_rule": "SP3", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
             "selected_code": selected.get("code_formatted", ""), "full_sequence_valid": True,
             "partial_sequence_valid": True, "causal_links": bottom_checks,
             "warnings": [], "needs_manual_review": False,
             "explanation": "SP3 applied: Table A confirms that the lowest used Part I line explains all lines above it.",
+            "rule_path": ["SP3"],
+            "blocking": False,
             "taba_sequence": taba_seq,
         }
 
@@ -4990,26 +5027,66 @@ def apply_sp1_to_sp5_with_taba(coded_causes: List[Dict], taba_df: pd.DataFrame) 
     if deepest_index > 0:
         selected = part1[deepest_index]
         return {
-            "sp_rule": "SP4", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
+            "base_sp_rule": "SP4", "sp_rule": "SP4", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
             "selected_code": selected.get("code_formatted", ""), "full_sequence_valid": False,
             "partial_sequence_valid": True, "causal_links": adjacent,
             "warnings": ["SP3 was not confirmed by Table A, but a valid partial sequence reaches the terminal condition."],
             "needs_manual_review": True,
             "explanation": f"SP4 applied: Table A confirms a partial sequence reaching line (a). The origin of that run is Part I ({selected.get('line','')}).",
+            "rule_path": ["SP4"],
+            "blocking": False,
             "taba_sequence": taba_seq,
         }
 
     selected = part1[0]
     return {
-        "sp_rule": "SP5", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
+        "base_sp_rule": "SP5", "sp_rule": "SP5", "selected_line": selected.get("line", ""), "selected_cause": selected.get("cause", ""),
         "selected_code": selected.get("code_formatted", ""), "full_sequence_valid": False,
         "partial_sequence_valid": False, "causal_links": adjacent or bottom_checks,
         "warnings": ["Table A did not confirm an acceptable sequence reaching the terminal condition; first-mentioned Part I condition is retained as the review candidate."],
         "needs_manual_review": True,
         "explanation": "SP5 applied: no acceptable Table A sequence could be established from the Part I chain.",
+        "rule_path": ["SP5"],
+        "blocking": False,
         "taba_sequence": taba_seq,
     }
 
+
+
+
+def sp7_is_hard_ill_defined(item: Dict) -> bool:
+    """Hard SP7 doctor-fix cases: terminal mode/vague mechanism, not a proper underlying disease."""
+    if not item:
+        return False
+    code_norm = code_norm_for_rules(item.get("code_formatted", ""))
+    cause = normalize_text_basic(item.get("cause", ""))
+    text_flags = _excel_text_flags(item) if "_excel_text_flags" in globals() else ""
+    hard_terms = [
+        "cardiac arrest", "respiratory arrest", "respiratory failure", "acute respiratory failure",
+        "multi organ failure", "multi-organ failure", "old age", "senility",
+        "unknown cause", "unknown", "natural causes", "cardiorespiratory arrest",
+    ]
+    if any(t in cause for t in hard_terms):
+        return True
+    if "ill-defined" in text_flags or "ill defined" in text_flags or "illdefined" in text_flags:
+        return True
+    # Common terminal/vague ICD families for COD quality prompts.
+    if code_norm.startswith("R") or code_norm.startswith("I46") or code_norm.startswith("J96"):
+        return True
+    return False
+
+
+def sp1_single_cause_warning(sp_review: Dict, coded_causes: List[Dict]) -> str:
+    """Doctor-facing warning when only one Part I condition is entered."""
+    part1 = [x for x in coded_causes or [] if x.get("role") in {"immediate", "contributing", "underlying"}]
+    if len(part1) == 1:
+        c = part1[0]
+        return (
+            f"Only one Part I condition was entered. Under SP1/SP2, '{c.get('cause','')}' "
+            "is treated as both the immediate cause and the tentative underlying cause. "
+            "If it is only a terminal mechanism or the result of another disease, go back and add the causal sequence below line (a)."
+        )
+    return ""
 
 def apply_sp6_with_tabb(sp_review: Dict, coded_causes: List[Dict], tabb_df: pd.DataFrame) -> Dict:
     """SP6 direct-sequel loop using Table B/TABB. Current TSP is the address; DS underneath is the obvious cause."""
@@ -5050,6 +5127,9 @@ def apply_sp6_with_tabb(sp_review: Dict, coded_causes: List[Dict], tabb_df: pd.D
             break
 
     if trace:
+        out.setdefault("base_sp_rule", out.get("sp_rule", "REVIEW"))
+        out.setdefault("rule_path", [out.get("base_sp_rule", out.get("sp_rule", "REVIEW"))])
+        out["rule_path"].append("SP6")
         out["sp_rule"] = "SP6"
         out["selected_code"] = current_code
         out["selected_line"] = current_line
@@ -5065,6 +5145,15 @@ def apply_sp7_sp8_quality(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
     """SP7/SP8 quality checks after SP1-SP6. These are doctor/coder prompts, not free LLM decisions."""
     out = dict(sp_review or {})
     out.setdefault("warnings", [])
+    out.setdefault("base_sp_rule", out.get("sp_rule", "REVIEW"))
+    out.setdefault("rule_path", [out.get("base_sp_rule", out.get("sp_rule", "REVIEW"))])
+
+    # Add an explicit doctor-facing warning for the common one-cause certificate case.
+    one_cause_msg = sp1_single_cause_warning(out, coded_causes)
+    if one_cause_msg and one_cause_msg not in out["warnings"]:
+        out["warnings"].append(one_cause_msg)
+        out["needs_manual_review"] = True
+
     selected = None
     selected_line = str(out.get("selected_line", "")).lower()
     selected_code = code_norm_for_rules(out.get("selected_code", ""))
@@ -5075,21 +5164,32 @@ def apply_sp7_sp8_quality(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
     if not selected:
         return out
 
-    sp7 = is_excel_ill_defined(selected)
+    sp7 = sp7_is_hard_ill_defined(selected)
     sp8 = is_excel_unlikely_to_cause_death(selected) or acceptable_main_bool(selected.get("acceptable_main", "")) is False
     out["sp7_sp8_quality"] = {
         "sp7_ill_defined": bool(sp7),
         "sp8_unlikely_or_unacceptable": bool(sp8),
         "checked_code": selected.get("code_formatted", ""),
         "checked_cause": selected.get("cause", ""),
+        "doctor_action_required": bool(sp7),
     }
     if sp7:
-        out["warnings"].append("SP7: the selected starting point appears ill-defined/vague or terminal. Ask the certifier for the disease or injury that caused it.")
+        msg = (
+            "SP7 hard stop: the selected starting point is ill-defined/vague or a terminal mechanism. "
+            "Go back to Cause of Death and enter the disease, injury, or condition that caused it."
+        )
+        out["warnings"].append(msg)
         out["needs_manual_review"] = True
+        out["blocking"] = True
+        if "SP7" not in out["rule_path"]:
+            out["rule_path"].append("SP7")
         out["sp_rule"] = "SP7"
+        out["doctor_action"] = "Go back and replace the ill-defined/terminal cause with a specific underlying disease or injury."
     if sp8:
         out["warnings"].append("SP8: the selected starting point appears unlikely/trivial or not acceptable as UCOD. Coder review is required.")
         out["needs_manual_review"] = True
+        if "SP8" not in out["rule_path"]:
+            out["rule_path"].append("SP8")
         if not sp7:
             out["sp_rule"] = "SP8"
     return out
@@ -5130,8 +5230,13 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     taba_sequence = sp_review.get("taba_sequence") or check_part1_sequence_with_taba(part1_items_for_taba, active_taba_df)
     tabb_result = run_tabb_certificate_check(active_tabb_df, coded_causes, sp_review, validation)
 
-    # Sequence status based on deterministic result.
-    status = "pass" if (sp_review.get("needs_manual_review") is False and sp_review.get("sp_rule") in {"SP1", "SP2", "SP3"}) else "warning"
+    # Sequence status based on deterministic result. SP7 hard ill-defined causes block submission.
+    if sp_review.get("blocking"):
+        status = "block"
+    elif sp_review.get("needs_manual_review") is False and sp_review.get("sp_rule") in {"SP1", "SP2", "SP3"}:
+        status = "pass"
+    else:
+        status = "warning"
     selected = sp_review.get("selected_cause", "")
     code = sp_review.get("selected_code", "")
     line = sp_review.get("selected_line", "")
@@ -5155,8 +5260,11 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
         "summary": summary,
         "issues": rule_issues,
         "rule_issues": rule_issues,
-        "condition_to_continue": "Certificate can continue to final preview." if status == "pass" else "Manual coder review is recommended before final submission.",
-        "blocking": False,
+        "condition_to_continue": (
+            "Go back to Cause of Death and fix the selected cause." if status == "block"
+            else ("Certificate can continue to final preview." if status == "pass" else "Manual coder review is recommended before final submission.")
+        ),
+        "blocking": status == "block",
         "sp_review": sp_review,
         "taba_sequence": taba_sequence,
         "tabb_result": tabb_result,
