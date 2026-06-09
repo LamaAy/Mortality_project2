@@ -5113,8 +5113,22 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     sp_review = apply_sp_engine(api_key, coded_results.get("concepts", {}) or {}, coded_causes)
 
     part1_items_for_taba = [x for x in coded_causes if x.get("role") in {"immediate", "contributing", "underlying"}]
-    taba_sequence = sp_review.get("taba_sequence") or check_part1_sequence_with_taba(part1_items_for_taba, taba_df or load_taba_rules())
-    tabb_result = run_tabb_certificate_check(tabb_df or load_tabb_rules(), coded_causes, sp_review, validation)
+
+    # Do not use `taba_df or load_taba_rules()` because pandas DataFrames cannot be
+    # evaluated as True/False. Streamlit Cloud raises:
+    # ValueError: The truth value of a DataFrame is ambiguous.
+    if taba_df is None or getattr(taba_df, "empty", True):
+        active_taba_df = load_taba_rules()
+    else:
+        active_taba_df = taba_df
+
+    if tabb_df is None or getattr(tabb_df, "empty", True):
+        active_tabb_df = load_tabb_rules()
+    else:
+        active_tabb_df = tabb_df
+
+    taba_sequence = sp_review.get("taba_sequence") or check_part1_sequence_with_taba(part1_items_for_taba, active_taba_df)
+    tabb_result = run_tabb_certificate_check(active_tabb_df, coded_causes, sp_review, validation)
 
     # Sequence status based on deterministic result.
     status = "pass" if (sp_review.get("needs_manual_review") is False and sp_review.get("sp_rule") in {"SP1", "SP2", "SP3"}) else "warning"
