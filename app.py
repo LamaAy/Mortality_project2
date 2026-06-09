@@ -797,6 +797,17 @@ LAY_QUERY_EXPANSIONS = {
     "type i diabetes": ["type 1 diabetes mellitus", "insulin dependent diabetes mellitus"],
     "fluid in lungs": ["pulmonary edema", "acute pulmonary edema"],
     "lung infection": ["pneumonia", "lower respiratory infection"],
+    "lung cancer": [
+        "malignant neoplasm of bronchus and lung",
+        "malignant neoplasm of lung",
+        "malignant neoplasm of unspecified part of bronchus or lung",
+        "bronchus lung malignant neoplasm",
+        "primary malignant neoplasm lung",
+    ],
+    "bronchogenic carcinoma": [
+        "malignant neoplasm of bronchus and lung",
+        "lung cancer",
+    ],
     "brain bleed": ["intracranial hemorrhage", "cerebral hemorrhage"],
     "blood clot in lung": ["pulmonary embolism"],
     "cancer spread": ["metastatic malignant neoplasm", "secondary malignant neoplasm"],
@@ -1065,6 +1076,7 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
     q = normalize_text_basic(query)
     text = normalize_text_basic(row["combined_text"])
     code = str(row["CodeFormatted"]).upper()
+    code_norm = code.replace(".", "").replace(" ", "")
     acc = acceptable_main_bool(row["AcceptableMain"])
     gender_ok = is_gender_allowed(row["GenderRestriction"], sex_value)
 
@@ -1099,6 +1111,26 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
     if code.startswith("Y") and not query_indicates_external_cause(q):
         score -= 4.0
         reasons.append("procedure/misadventure code penalized")
+
+    if "lung cancer" in q or ("lung" in q and "cancer" in q) or "bronchogenic carcinoma" in q:
+        # For generic doctor text such as "lung cancer", prefer primary malignant neoplasm
+        # of bronchus/lung (C34) over carcinoid tumors, benign tumors, infections, or metastases.
+        if code_norm.startswith("C34"):
+            score += 8.0
+            reasons.append("preferred primary lung cancer family C34")
+        if code_norm.startswith(("C7A", "D3A", "A52", "J", "B", "D14")):
+            score -= 4.0
+            reasons.append("non-primary lung cancer family penalized")
+        # If doctor did not specify a lobe/site, prefer unspecified bronchus/lung terms.
+        site_terms = ["upper", "lower", "middle", "lobe", "main bronchus"]
+        generic_query = not any(t in q for t in site_terms)
+        if generic_query:
+            if code_norm.startswith("C349") or "unspecified" in text:
+                score += 2.0
+                reasons.append("generic lung cancer phrase prefers unspecified site")
+            if any(t in text for t in ["upper lobe", "lower lobe", "middle lobe", "main bronchus"]):
+                score -= 1.2
+                reasons.append("specific lung site penalized because doctor did not specify site")
 
     if "acute respiratory distress syndrome" in q or re.fullmatch(r"ards", q):
         if code.startswith("J80"):
@@ -1166,6 +1198,22 @@ def search_icd_candidates(
     bm_hits = bm25_search(df_source, bm25, query, top_k=50)
 
     fused = reciprocal_rank_fusion([exact_hits, sem_hits, bm_hits], k=60)
+
+    # Rule-guided recall boost for common plain-language diagnoses.
+    # The local retrievers sometimes rank rare lung entities above primary lung cancer
+    # because they share words like "bronchus" and "lung". For "lung cancer", force
+    # C34 rows into the candidate pool before reranking. The final selected code still
+    # comes only from the local ICD file.
+    q_norm = normalize_text_basic(query)
+    if "lung cancer" in q_norm or ("lung" in q_norm and "cancer" in q_norm) or "bronchogenic carcinoma" in q_norm:
+        try:
+            c34_hits = df_source.index[
+                df_source["CodeFormatted"].astype(str).str.upper().str.replace(".", "", regex=False).str.startswith("C34")
+            ].tolist()
+            for idx in c34_hits[:80]:
+                fused[int(idx)] = fused.get(int(idx), 0.0) + 0.08
+        except Exception:
+            pass
 
     candidates = []
     for idx, rrf_score in fused.items():
@@ -3467,7 +3515,11 @@ def reset_agent_workflow(clear_codes: bool = True) -> None:
     if clear_codes:
         st.session_state.icd_results = None
         for k in list(st.session_state.keys()):
-            if str(k).startswith("code_edit_"):
+            if (
+                str(k).startswith("code_edit_")
+                or str(k).startswith("doctor_icd_choice_")
+                or str(k).startswith("doctor_icd_reason_")
+            ):
                 del st.session_state[k]
 
 def build_structured_cod_from_form_state(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
@@ -4025,7 +4077,26 @@ def agent1_input_validation_with_llm(api_key: str, part1_chain: List[Dict], part
             "blocking": False,
         })
 
-    rule_issues = list(precheck.get("issues", [])) + cross_issues + sequence_issues
+    # Doctor-facing SP1 notice: one written Part I cause is allowed, but the doctor
+    # should be reminded that this same cause will be treated as both immediate
+    # and tentative underlying cause unless a lower causal disease is added.
+    single_cause_issues = []
+    filled_part1 = precheck.get("part1_chain", []) or []
+    if len(filled_part1) == 1:
+        only = filled_part1[0]
+        single_cause_issues.append({
+            "severity": "warning",
+            "line": f"Part I ({only.get('line', 'a')})",
+            "type": "single_cause_sp1_notice",
+            "message": (
+                "Only one cause is entered. SP1 will treat this same condition as both the "
+                "immediate cause and the tentative underlying cause. If another disease, injury, "
+                "or condition led to it, add that condition on a lower Part I line before coding."
+            ),
+            "blocking": False,
+        })
+
+    rule_issues = list(precheck.get("issues", [])) + cross_issues + sequence_issues + single_cause_issues
     blocking = any(x.get("severity") == "error" or x.get("blocking") for x in rule_issues)
     fallback = {
         "status": "block" if blocking else ("warning" if rule_issues else "pass"),
@@ -4055,6 +4126,7 @@ def agent1_input_validation_with_llm(api_key: str, part1_chain: List[Dict], part
     # Deterministic rule status is authoritative.
     llm["status"] = fallback["status"]
     llm["blocking"] = blocking
+    llm["issues"] = fallback["issues"]
     llm["rule_issues"] = rule_issues
     llm["precheck"] = precheck
     llm["condition_to_continue"] = fallback["condition_to_continue"]
@@ -4412,6 +4484,19 @@ def render_agent_result(result: Dict, step: int, title: str, waiting_text: str =
     elif status == "block":
         box_class += " block"
 
+    issue_preview_rows = []
+    for issue in issues[:4]:
+        if isinstance(issue, dict):
+            sev = str(issue.get("severity", "warning")).upper()
+            line = str(issue.get("line", "")).strip()
+            msg = str(issue.get("message", "")).strip()
+            if msg:
+                issue_preview_rows.append(f"<div>• <b>{escape(sev)}</b> {escape(line + ': ' if line else '')}{escape(msg)}</div>")
+    issue_preview_html = (
+        '<div class="agent-sp-issues"><b>Review notes:</b>' + ''.join(issue_preview_rows) + '</div>'
+        if issue_preview_rows else ''
+    )
+
     html_out = (
         f'<div class="{box_class}">'
         f'<div class="agent-kicker">{escape(clinical_step_label(step).upper())}</div>'
@@ -4419,6 +4504,7 @@ def render_agent_result(result: Dict, step: int, title: str, waiting_text: str =
         f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
         f'<div>{escape(summary)}</div>'
         f'<div class="agent-hidden-details-note">{escape(output_note)}</div>'
+        f'{issue_preview_html}'
         '</div>'
     )
     st.markdown(html_out, unsafe_allow_html=True)
@@ -4472,8 +4558,27 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
         who_html = f'<br><span class="agent-hidden-details-note"><b>WHO API:</b> {escape(who_status)} — {escape(who_msg)}</span>'
 
         cand_source = item.get("candidates", []) or item.get("top_candidates", []) or []
+        # Show the selected local code first if it was returned lower than the top 3.
+        # This avoids a confusing UI where Claude selected a candidate from top-k but the
+        # visible top-3 list does not include it.
+        selected_norm = str(item.get("code_formatted", item.get("selected_code", ""))).upper().replace(".", "").replace(" ", "")
+        display_candidates = []
+        if selected_norm:
+            for c in cand_source:
+                c_norm = str(c.get("code_formatted", c.get("code", ""))).upper().replace(".", "").replace(" ", "")
+                if c_norm == selected_norm:
+                    display_candidates.append(c)
+                    break
+        for c in cand_source:
+            c_norm = str(c.get("code_formatted", c.get("code", ""))).upper().replace(".", "").replace(" ", "")
+            if c_norm and c_norm == selected_norm:
+                continue
+            display_candidates.append(c)
+            if len(display_candidates) >= 3:
+                break
+
         top_rows = []
-        for c in cand_source[:3]:
+        for c in display_candidates[:3]:
             c_code = escape(c.get("code_formatted", c.get("code", "")))
             c_desc = escape(c.get("short_desc", ""))
             c_score = c.get("score", "")
@@ -4481,7 +4586,8 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
                 score_txt = f" — score {float(c_score):.2f}"
             except Exception:
                 score_txt = ""
-            top_rows.append(f"<li><b>{c_code}</b> — {c_desc}{escape(score_txt)}</li>")
+            marker = " <span class='agent-hidden-details-note'>(selected)</span>" if str(c.get("code_formatted", c.get("code", ""))).upper().replace(".", "").replace(" ", "") == selected_norm else ""
+            top_rows.append(f"<li><b>{c_code}</b> — {c_desc}{escape(score_txt)}{marker}</li>")
         top_html = "".join(top_rows) if top_rows else "<li>No retrieved candidates shown.</li>"
 
         items_html.append(
@@ -4493,7 +4599,7 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
             f'<span class="agent-hidden-details-note"><b>Local source:</b> ICD Excel/retrieval file; Status: {status_txt}</span>'
             f'{who_html}'
             f'</div>'
-            f'<div class="agent2-top3"><b>Excel/local top 3 retrieved candidates:</b><ol>{top_html}</ol></div>'
+            f'<div class="agent2-top3"><b>Excel/local retrieved candidates shown to coder:</b><ol>{top_html}</ol></div>'
             f'</div>'
         )
 
@@ -4521,6 +4627,171 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
         f'</div>'
     )
     st.markdown(html_out, unsafe_allow_html=True)
+
+
+def _candidate_code_label(code: str, desc: str, selected: bool = False) -> str:
+    prefix = "Current recommendation: " if selected else ""
+    return f"{prefix}{code} — {desc}" if code else "Needs coder review / no suitable code"
+
+
+def _candidate_option_maps(item: Dict) -> Tuple[List[str], Dict[str, str]]:
+    """Build stable code options from the selected local code plus retrieved Excel candidates."""
+    options: List[str] = []
+    labels: Dict[str, str] = {}
+
+    current_code = str(item.get("code_formatted", "") or "").strip()
+    current_desc = str(item.get("short_desc", "") or item.get("long_desc", "") or "").strip()
+    if current_code:
+        options.append(current_code)
+        labels[current_code] = _candidate_code_label(current_code, current_desc, selected=True)
+
+    for c in item.get("candidates", []) or []:
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip()
+        desc = str(c.get("short_desc", "") or c.get("long_desc", "") or "").strip()
+        if not code or code in options:
+            continue
+        options.append(code)
+        labels[code] = _candidate_code_label(code, desc, selected=False)
+        if len(options) >= 12:
+            break
+
+    options.append("__REVIEW__")
+    labels["__REVIEW__"] = "Needs coder review / no suitable code"
+    return options, labels
+
+
+def _row_to_coded_fields(row: pd.Series) -> Dict:
+    return {
+        "code_formatted": str(row.get("CodeFormatted", "")),
+        "short_desc": str(row.get("ShortDesc", "")),
+        "long_desc": str(row.get("LongDesc", "")),
+        "acceptable_main": str(row.get("AcceptableMain", "")),
+        "gender_restriction": str(row.get("GenderRestriction", "")),
+        "classification": str(row.get("Classification", "")),
+        "note": str(row.get("Note", "")),
+    }
+
+
+def apply_doctor_icd_choices_to_results(
+    coded_results: Dict,
+    df_source: pd.DataFrame,
+    release_id: str = "2019",
+) -> Tuple[Dict, List[str]]:
+    """Apply doctor/coder ICD dropdown selections to coded_results and re-run WHO verification."""
+    updated = dict(coded_results or {})
+    new_coded: List[Dict] = []
+    missing_reasons: List[str] = []
+
+    for idx, item in enumerate(updated.get("coded_causes", []) or []):
+        x = dict(item)
+        old_code = str(x.get("code_formatted", "") or "").strip()
+        chosen_code = st.session_state.get(f"doctor_icd_choice_{idx}", old_code or "__REVIEW__")
+        reason = str(st.session_state.get(f"doctor_icd_reason_{idx}", "") or "").strip()
+
+        if chosen_code == "__REVIEW__":
+            if not reason:
+                missing_reasons.append(f"Line {x.get('line', '')}: add a reason for coder review.")
+            x.update({
+                "code_formatted": "",
+                "short_desc": "",
+                "long_desc": "",
+                "acceptable_main": "Unknown",
+                "gender_restriction": "",
+                "classification": "",
+                "note": "",
+                "selection_status": "manual_review",
+                "selection_notes": reason or "Doctor/coder marked this line for manual coding review.",
+                "doctor_selected_code": "",
+                "doctor_override_reason": reason,
+                "who_api": verify_code_with_who_api("", release_id=release_id),
+            })
+            new_coded.append(x)
+            continue
+
+        chosen_code = str(chosen_code or "").strip()
+        changed = bool(chosen_code and chosen_code != old_code)
+        if changed and not reason:
+            missing_reasons.append(f"Line {x.get('line', '')}: add a reason for changing {old_code or 'empty code'} to {chosen_code}.")
+
+        row = get_row_by_code(df_source, chosen_code)
+        if row is not None:
+            x.update(_row_to_coded_fields(row))
+            x["selection_status"] = "doctor_selected" if changed else str(x.get("selection_status", "doctor_confirmed"))
+            x["selection_notes"] = reason if changed else (str(x.get("selection_notes", "")) or "Doctor/coder confirmed the recommended ICD code.")
+            x["doctor_selected_code"] = chosen_code
+            x["doctor_override_reason"] = reason
+            x["who_api"] = verify_code_with_who_api(chosen_code, release_id=release_id)
+        else:
+            missing_reasons.append(f"Line {x.get('line', '')}: selected code {chosen_code} was not found in the local ICD Excel file.")
+            x["selection_status"] = "manual_review"
+            x["selection_notes"] = reason or f"Selected code {chosen_code} was not found in the local ICD Excel file."
+            x["doctor_selected_code"] = chosen_code
+            x["doctor_override_reason"] = reason
+            x["who_api"] = verify_code_with_who_api(chosen_code, release_id=release_id)
+        new_coded.append(x)
+
+    if missing_reasons:
+        return coded_results, missing_reasons
+
+    updated["coded_causes"] = new_coded
+    updated.setdefault("validation", {})
+    updated["validation"] = validate_certificate(new_coded, st.session_state.get("form_data", {}).get("sex", ""))
+    updated["validation"]["doctor_icd_choice_applied"] = True
+    updated["validation"]["who_api_release"] = release_id
+    updated["validation"]["who_api_checked"] = True
+    return updated, []
+
+
+def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd.DataFrame, api_key: str, patient_info: Dict) -> None:
+    """Doctor/coder-facing constrained ICD code chooser after retrieval."""
+    if not coded_results or not coded_results.get("coded_causes"):
+        return
+
+    st.markdown("### Doctor ICD code selection")
+    st.caption(
+        "The system recommends a local ICD Excel code. The doctor/coder may confirm it, choose another retrieved Excel candidate, "
+        "or send the line to manual coder review. WHO API verification remains a separate verification note, not the final code source."
+    )
+
+    for idx, item in enumerate(coded_results.get("coded_causes", []) or []):
+        options, labels = _candidate_option_maps(item)
+        current_code = str(item.get("code_formatted", "") or "").strip()
+        default_code = current_code if current_code in options else (options[0] if options else "__REVIEW__")
+        current_index = options.index(default_code) if default_code in options else 0
+        line = item.get("line", "")
+        cause = item.get("cause", "")
+        with st.container(border=True):
+            st.markdown(f"**Line {line} — {cause}**")
+            choice = st.selectbox(
+                "Choose final ICD code for this line",
+                options,
+                index=current_index,
+                format_func=lambda x, labels=labels: labels.get(x, str(x)),
+                key=f"doctor_icd_choice_{idx}",
+            )
+            if choice != current_code:
+                st.text_area(
+                    "Reason for changing the system recommendation / requesting review",
+                    key=f"doctor_icd_reason_{idx}",
+                    placeholder="Example: The doctor did not specify upper lobe, so an unspecified bronchus/lung code is more appropriate.",
+                    height=70,
+                )
+            who = item.get("who_api", {}) or {}
+            st.caption(f"Current WHO verification: {who.get('status', 'not checked')} — {who.get('message', '')}")
+
+    if st.button("Apply ICD choices and refresh WHO/Table A/B workflow", type="primary"):
+        updated, problems = apply_doctor_icd_choices_to_results(coded_results, df_source, release_id="2019")
+        if problems:
+            for p in problems:
+                st.warning(p)
+            return
+        st.session_state.icd_results = updated
+        st.session_state.agent2_result = agent2_candidate_validation_with_llm(api_key, updated, patient_info)
+        st.session_state.agent2_done = True
+        st.session_state.agent3_done = False
+        st.session_state.agent3_result = None
+        st.success("Doctor ICD choices were applied. Please run the Table A/B Rule Trace again.")
+        st.rerun()
 
 def render_agent3_result(result: Dict) -> None:
     """Agent 3 output card: title + SP rule + selected line + UCOD explanation in one square."""
@@ -5761,6 +6032,13 @@ elif st.session_state.page == 4:
             render_agent_prompt_box(AGENT2_SYSTEM_PROMPT)
 
             render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
+            if st.session_state.get("icd_results"):
+                render_doctor_icd_choice_editor(
+                    st.session_state.get("icd_results"),
+                    df_source,
+                    API_KEY,
+                    patient_info,
+                )
 
             b_run, b_back = st.columns([1.4, 1])
             with b_run:
