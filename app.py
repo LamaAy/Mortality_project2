@@ -2442,7 +2442,14 @@ def generate_certificate_pdf(
 
     for i, item in enumerate(part1):
         lbl = row_labels[i] if i < len(row_labels) else f"({i+1})"
-        role_text = "Immediate cause of death" if i == 0 else f"Due to (antecedent cause)"
+        if len(part1) == 1 and i == 0:
+            role_text = "Immediate and underlying cause of death (SP1)"
+        elif i == 0:
+            role_text = "Immediate cause of death"
+        elif i == len(part1) - 1:
+            role_text = "Underlying cause (lowest completed Part I line)"
+        else:
+            role_text = "Due to (antecedent cause)"
         code_val  = item.get("code_formatted") or "— Pending review"
         short_val = item.get("short_desc") or ""
         cause_val = item.get("cause") or "—"
@@ -2550,14 +2557,19 @@ def generate_certificate_pdf(
 
     # ── Underlying Cause Banner ───────────────────────────────────────────────
     underlying_code = validation.get("underlying_cause") or "Pending manual review"
+    underlying_text = validation.get("underlying_cause_text") or validation.get("starting_point_text") or "Not confirmed"
+    sp_rule_for_pdf = validation.get("sp_rule") or validation.get("starting_point_rule") or "REVIEW"
     quality         = validation.get("overall_quality", "Needs Review")
     q_color         = {"Excellent": colors.HexColor("#006940"), "Good": colors.HexColor("#2d7a4f")}.get(quality, colors.HexColor("#c0392b"))
 
     uc_data = [[
-        Paragraph("Underlying Cause (for mortality statistics):", S("Normal", fontSize=9, textColor=colors.white, fontName="Helvetica-Bold")),
+        Paragraph(
+            f"Underlying Cause (UCOD for mortality statistics):<br/><font size='8'>Rule: {escape(sp_rule_for_pdf)} · Cause: {escape(underlying_text)}</font>",
+            S("Normal", fontSize=9, textColor=colors.white, fontName="Helvetica-Bold")
+        ),
         Paragraph(f"<b>{underlying_code}</b>", S("Normal", fontSize=13, textColor=GOLD, fontName="Helvetica-Bold", alignment=TA_RIGHT)),
     ]]
-    uc_table = Table(uc_data, colWidths=[W * 0.65, W * 0.35])
+    uc_table = Table(uc_data, colWidths=[W * 0.72, W * 0.28])
     uc_table.setStyle(TableStyle([
         ("BACKGROUND",    (0,0),(-1,-1), GREEN),
         ("TOPPADDING",    (0,0),(-1,-1), 8),
@@ -2574,6 +2586,12 @@ def generate_certificate_pdf(
     issues = validation.get("coding_issues", [])
     story.append(Paragraph("VALIDATION SUMMARY", h2_style))
     story.append(HRFlowable(width=W, thickness=1, color=q_color, spaceAfter=3))
+    story.append(Paragraph(
+        f"Starting-point rule: <b>{escape(validation.get('sp_rule') or validation.get('starting_point_rule') or 'REVIEW')}</b>. "
+        f"Selected UCOD: <b>{escape(validation.get('underlying_cause_text') or validation.get('starting_point_text') or 'Not confirmed')}</b> "
+        f"({escape(validation.get('underlying_cause') or 'Pending manual review')}).",
+        small_style
+    ))
 
     qual_data = [[Paragraph(f"Overall Quality: <b>{quality}</b>", S("Normal", fontSize=9, textColor=q_color, fontName="Helvetica-Bold"))]]
     qual_table = Table(qual_data, colWidths=[W])
@@ -2978,9 +2996,10 @@ def apply_sp_result_to_validation(validation: Dict, sp_review: Dict, coded_cause
     Preserve the SP-selected starting point independently from ICD coding.
 
     Important logic:
-    - SP3/SP4/etc. may successfully select a starting-point *cause text*.
+    - SP1/SP3/SP4/etc. may successfully select a starting-point *cause text*.
     - ICD coding for that cause may still be missing/manual-review.
-    - Therefore the certificate should not show an empty UCOD just because the ICD code is pending.
+    - Therefore the certificate must show both the UCOD text and the ICD code status.
+    - SP warnings must also appear in the final certificate, not only in Review & Coding.
     """
     out = dict(validation or {})
     selected_cause = str(sp_review.get("selected_cause", "") or "").strip()
@@ -2992,6 +3011,7 @@ def apply_sp_result_to_validation(validation: Dict, sp_review: Dict, coded_cause
     out["starting_point_rule"] = out["sp_rule"]
     out["starting_point_line"] = selected_line
     out["starting_point_text"] = selected_cause
+    out["rule_path"] = sp_review.get("rule_path", [out["sp_rule"]])
 
     # Keep both text and code. Never erase the selected cause text if the code is pending.
     if selected_cause:
@@ -3008,6 +3028,31 @@ def apply_sp_result_to_validation(validation: Dict, sp_review: Dict, coded_cause
     else:
         out["underlying_cause"] = "Not confirmed"
         out["underlying_cause_code_status"] = "not_confirmed"
+
+    # Put SP warnings into the final validation summary so the final certificate does
+    # not incorrectly say "No validation issues" for one-cause/SP1 cases.
+    issues = list(out.get("coding_issues", []) or [])
+    for w in sp_review.get("warnings", []) or []:
+        msg = f"{out['sp_rule']}: {w}"
+        if msg not in issues:
+            issues.append(msg)
+    if sp_review.get("blocking"):
+        block_msg = sp_review.get("doctor_action") or "Doctor action required before final certification."
+        if block_msg not in issues:
+            issues.append(block_msg)
+
+    out["coding_issues"] = issues
+
+    # Quality label for the final certificate.
+    # One-cause SP1 is not invalid, but it should be shown as review-suggested, not Excellent.
+    if sp_review.get("blocking") or out["sp_rule"] in {"REVIEW", "SP7", "SP8"}:
+        out["overall_quality"] = "Needs Review"
+    elif sp_review.get("warnings"):
+        out["overall_quality"] = "Good"
+    elif not issues:
+        out["overall_quality"] = "Excellent"
+    else:
+        out["overall_quality"] = out.get("overall_quality") or "Needs Review"
 
     return out
 
@@ -6167,6 +6212,22 @@ elif st.session_state.page == 5:
     validation = results.get("validation", {})
     concepts = results.get("concepts", {})
 
+    # Final certificate must always have a current SP/UCOD trace.
+    # This avoids a final PDF that shows only an immediate cause but does not
+    # explicitly show that SP1 also treats it as the underlying cause.
+    try:
+        if not validation.get("sp_review"):
+            sp_for_final = apply_sp_engine(API_KEY or "", concepts or {}, coded_causes)
+            validation = apply_sp_result_to_validation(validation, sp_for_final, coded_causes)
+            results["validation"] = validation
+            st.session_state.icd_results = results
+    except Exception as _sp_final_error:
+        validation = dict(validation or {})
+        issues_tmp = list(validation.get("coding_issues", []) or [])
+        issues_tmp.append(f"Final SP rule refresh failed: {type(_sp_final_error).__name__}: {_sp_final_error}")
+        validation["coding_issues"] = issues_tmp
+        validation["overall_quality"] = "Needs Review"
+
     part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
     part2 = [x for x in coded_causes if x["role"] == "other"]
 
@@ -6175,6 +6236,9 @@ elif st.session_state.page == 5:
     issues = validation.get("coding_issues", [])
     who_notes = validation.get("who_notes", "")
     underlying_code = validation.get("underlying_cause") or "Pending manual review"
+    underlying_text = validation.get("underlying_cause_text") or validation.get("starting_point_text") or "Not confirmed"
+    sp_rule_final = validation.get("sp_rule") or validation.get("starting_point_rule") or "REVIEW"
+    underlying_display = f"{underlying_text} — {underlying_code}" if underlying_text and underlying_text != "Not confirmed" else underlying_code
 
     quality_color = {
         "Excellent": "#006940",
@@ -6182,9 +6246,14 @@ elif st.session_state.page == 5:
         "Needs Review": "#c0392b",
     }.get(quality, "#888")
 
-    # ── PDF download (generate once per session state hash) ──────────────────
+    # ── PDF download (regenerate if certificate content/rules changed) ───────
     pdf_cache_key = "pdf_bytes_cached"
-    if pdf_cache_key not in st.session_state or st.session_state.get("pdf_cert_no") != cert_no:
+    pdf_signature = json.dumps({
+        "cert_no": cert_no,
+        "coded_causes": coded_causes,
+        "validation": validation,
+    }, ensure_ascii=False, sort_keys=True, default=str)
+    if pdf_cache_key not in st.session_state or st.session_state.get("pdf_signature") != pdf_signature:
         try:
             pdf_bytes = generate_certificate_pdf(
                 fd=fd,
@@ -6195,7 +6264,7 @@ elif st.session_state.page == 5:
                 doctor_name=doctor_name,
             )
             st.session_state[pdf_cache_key] = pdf_bytes
-            st.session_state["pdf_cert_no"] = cert_no
+            st.session_state["pdf_signature"] = pdf_signature
         except Exception as e:
             st.session_state[pdf_cache_key] = None
             st.error(f"PDF generation failed: {e}")
@@ -6212,7 +6281,8 @@ elif st.session_state.page == 5:
             f'<div style="background:white;border:2px solid {quality_color};border-radius:8px;'
             f'padding:.7rem 1rem;display:inline-block">'
             f'<b style="color:{quality_color}">Validation: {escape(quality)}</b> &nbsp;|&nbsp; '
-            f'Underlying cause: <b style="font-family:monospace">{escape(underlying_code)}</b>'
+            f'UCOD: <b>{escape(underlying_display)}</b> &nbsp;|&nbsp; '
+            f'Rule: <b>{escape(sp_rule_final)}</b>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -6267,10 +6337,19 @@ elif st.session_state.page == 5:
         long_display  = item.get("long_desc") or "Pending manual review"
         status_display= item.get("selection_status", "—")
 
+        if len(part1) == 1 and i == 0:
+            final_role_label = "Immediate and underlying cause (SP1)"
+        elif i == 0:
+            final_role_label = "Immediate cause"
+        elif i == len(part1) - 1:
+            final_role_label = "Underlying cause"
+        else:
+            final_role_label = "Due to"
+
         part1_html += f"""
         <div class="final-block">
             <div style="font-weight:700;color:#006940;margin-bottom:.35rem">
-                {escape(row_label)} {"Immediate cause" if i == 0 else "Due to"}
+                {escape(row_label)} {escape(final_role_label)}
             </div>
             <div style="font-size:.95rem;color:#1a2e1a;margin-bottom:.25rem">
                 {escape(item.get("cause", "—"))}
@@ -6328,8 +6407,9 @@ elif st.session_state.page == 5:
     st.markdown(
         f'<div style="background:#f0f4ff;border:2px solid #1a4a7a;border-radius:8px;'
         f'padding:1rem 1.4rem;margin-bottom:1rem">'
-        f'<b style="color:#1a4a7a;font-size:.95rem">Underlying Cause (for mortality statistics):</b> '
-        f'<span style="font-family:monospace;font-weight:800;font-size:1.1rem;color:#1a4a7a">{escape(underlying_code)}</span>'
+        f'<b style="color:#1a4a7a;font-size:.95rem">Underlying Cause / UCOD (for mortality statistics):</b> '
+        f'<span style="font-weight:800;font-size:1.02rem;color:#1a4a7a">{escape(underlying_display)}</span><br>'
+        f'<span style="font-size:.82rem;color:#355c7d">Starting-point rule: {escape(sp_rule_final)}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -6342,7 +6422,7 @@ elif st.session_state.page == 5:
         f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">'
         f'<b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>'
         f'<span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">'
-        f'Underlying cause: {escape(underlying_code)}</span></div></div>',
+        f'UCOD: {escape(underlying_display)} · Rule: {escape(sp_rule_final)}</span></div></div>',
         unsafe_allow_html=True,
     )
 
