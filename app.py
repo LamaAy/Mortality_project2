@@ -7051,7 +7051,7 @@ elif st.session_state.page == 4:
         return f"{line}: {msg}" if line else msg
 
     def _render_structure_result_clean(result: Dict) -> None:
-        """Doctor-facing structure result without the yellow warning card/hidden expander."""
+        """Doctor-facing structure result shown directly beside the certificate fields."""
         if not result:
             return
         status = str(result.get("status", "warning") or "warning").lower()
@@ -7064,15 +7064,24 @@ elif st.session_state.page == 4:
 
         if blocking or errors:
             status_text = "Blocked"
-            dot_color = "#c0392b"
+            accent = "#c0392b"
+            bg = "#fff5f5"
+            border = "#e4a6a6"
+            icon_html = "✕"
             title = "Structure check needs correction"
         elif warnings:
             status_text = "Review suggested"
-            dot_color = "#006940"
+            accent = "#a66a00"
+            bg = "#fffaf0"
+            border = "#e7c46a"
+            icon_html = "⚠"
             title = "Structure check completed"
         else:
             status_text = "Passed"
-            dot_color = "#006940"
+            accent = "#006940"
+            bg = "#ffffff"
+            border = "#d8e6dc"
+            icon_html = "<span style='display:inline-block;width:18px;height:18px;border-radius:50%;background:#006940;vertical-align:middle;'></span>"
             title = "Structure check passed"
 
         review_items = [_clean_issue_message(x) for x in (errors + warnings + infos)]
@@ -7082,16 +7091,16 @@ elif st.session_state.page == 4:
         review_html = "".join(f"<li>{escape(x)}</li>" for x in review_items[:8])
         st.markdown(
             f"""
-            <div style="max-width:760px;margin:0 auto 1.2rem auto;border:1px solid #d8e6dc;border-radius:18px;padding:1.25rem 1.35rem;background:#fff;box-shadow:0 10px 28px rgba(0,0,0,.04);">
+            <div style="width:100%;border:1px solid {border};border-radius:18px;padding:1.15rem 1.2rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
               <div style="text-align:center;">
-                <div style="width:18px;height:18px;border-radius:50%;background:{dot_color};display:inline-block;margin-bottom:.45rem;"></div>
-                <div style="font-size:1.35rem;font-weight:900;color:#10233f;">{escape(title)}</div>
-                <div style="font-weight:850;color:{dot_color};margin-top:.25rem;">Status: {escape(status_text)}</div>
+                <div style="font-size:1.55rem;line-height:1;color:{accent};font-weight:900;margin-bottom:.45rem;">{icon_html}</div>
+                <div style="font-size:1.22rem;font-weight:900;color:#10233f;">{escape(title)}</div>
+                <div style="font-weight:900;color:{accent};margin-top:.25rem;">Status: {escape(status_text)}</div>
               </div>
-              <div style="margin-top:1rem;color:#415a4d;line-height:1.55;">{escape(summary)}</div>
-              <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
+              <div style="margin-top:1rem;color:{accent if warnings and not (blocking or errors) else '#415a4d'};line-height:1.55;font-weight:{'800' if warnings and not (blocking or errors) else '500'};">{escape(summary)}</div>
+              <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;color:#172033;">
                 <b>Details</b>
-                <ul style="margin-top:.45rem;">{review_html}</ul>
+                <ul style="margin-top:.45rem;line-height:1.55;">{review_html}</ul>
               </div>
             </div>
             """,
@@ -7115,18 +7124,41 @@ elif st.session_state.page == 4:
     }
 
     stage = st.session_state.get("review_stage", "structure")
-    _render_review_stage_header(stage)
+    # Stage chips removed for a direct doctor-facing flow.
 
     # -------------------------------------------------------------------------
     # Stage 1: Structure Check
     # -------------------------------------------------------------------------
     if stage == "structure":
-        st.markdown('<div class="section-title">Structure Check</div>', unsafe_allow_html=True)
-        part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+        # Direct two-column layout: editable certificate fields on the left,
+        # structure result and action buttons on the right.
+        left_col, right_col = st.columns([1.62, 1.0], gap="large")
 
-        c_run, c_next = st.columns([1, 1])
-        with c_run:
-            if st.button("Run Structure Check", type="primary", use_container_width=True):
+        with left_col:
+            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+
+        with right_col:
+            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+            btn_left, btn_right = st.columns(2, gap="small")
+            with btn_left:
+                run_clicked = st.button(
+                    "Run Structure Check",
+                    type="primary",
+                    use_container_width=True,
+                    key="run_structure_check_direct",
+                )
+            with btn_right:
+                a1_current = st.session_state.get("agent1_result")
+                can_continue_current = bool(st.session_state.get("agent1_done")) and not bool((a1_current or {}).get("blocking"))
+                next_clicked = st.button(
+                    "Next → ICD Coding",
+                    type="primary",
+                    disabled=not can_continue_current,
+                    use_container_width=True,
+                    key="next_to_icd_direct",
+                )
+
+            if run_clicked:
                 save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
                 with st.spinner("Checking the doctor input..."):
                     st.session_state.agent1_result = agent1_input_validation_with_llm(
@@ -7137,16 +7169,16 @@ elif st.session_state.page == 4:
                 st.session_state.agent1_done = True
                 st.rerun()
 
-        a1 = st.session_state.get("agent1_result")
-        if a1:
-            _render_structure_result_clean(a1)
-
-        can_continue = bool(st.session_state.get("agent1_done")) and not bool((a1 or {}).get("blocking"))
-        with c_next:
-            if st.button("Next → ICD Coding", type="primary", disabled=not can_continue, use_container_width=True):
+            if next_clicked:
                 st.session_state.review_stage = "icd"
                 st.rerun()
 
+            a1 = st.session_state.get("agent1_result")
+            if a1:
+                st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+                _render_structure_result_clean(a1)
+
+    # -------------------------------------------------------------------------
     # -------------------------------------------------------------------------
     # Stage 2: ICD Coding and doctor ICD choice
     # -------------------------------------------------------------------------
