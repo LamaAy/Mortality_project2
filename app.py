@@ -7009,16 +7009,13 @@ elif st.session_state.page == 4:
 
     if df_source is None:
         st.error("ICD source data is unavailable. Please check sidebar loading errors and reload ICD data.")
-        if st.button("Back"):
-            st.session_state.page = 3
-            st.rerun()
         st.stop()
 
     if not API_KEY:
         st.error("ANTHROPIC_API_KEY is missing in Streamlit secrets.")
         st.stop()
 
-    # If the case came from Page 3, initialize editable agent fields once.
+    # Initialize editable review fields from the structured cause-of-death form.
     if fd.get("manual_part1_chain"):
         for x in fd.get("manual_part1_chain", []):
             line = str(x.get("line", "")).lower()
@@ -7030,16 +7027,97 @@ elif st.session_state.page == 4:
             st.session_state.setdefault(f"agent_part2_{idx}_cause", x.get("cause", ""))
             st.session_state.setdefault(f"agent_part2_{idx}_interval", x.get("interval", "—"))
 
-    if "agent_step" not in st.session_state:
-        st.session_state.agent_step = 1
+    if "review_stage" not in st.session_state:
+        st.session_state.review_stage = "structure"
 
-    st.markdown('<div class="section-title">Review & Coding</div>', unsafe_allow_html=True)
-    # Compact workflow page header only; explanatory caption removed for cleaner UI.
+    def _stage_chip(label: str, active: bool, done: bool = False) -> str:
+        if active:
+            style = "background:#006940;color:white;border-color:#006940;"
+        elif done:
+            style = "background:#e8f5ee;color:#006940;border-color:#b6ddc8;"
+        else:
+            style = "background:#fff;color:#6b7280;border-color:#d8e6dc;"
+        return f"<span style='display:inline-block;padding:.45rem .8rem;border-radius:999px;border:1px solid;{style}font-weight:800;font-size:.86rem;margin:.18rem'>{escape(label)}</span>"
 
-    left, right = st.columns([1.35, 1.0], gap="large")
+    def _render_review_stage_header(stage: str) -> None:
+        stages = [
+            ("structure", "1 Structure"),
+            ("icd", "2 ICD Coding"),
+            ("rules", "3 Table A/B"),
+        ]
+        done = {
+            "structure": bool(st.session_state.get("agent1_done")),
+            "icd": bool(st.session_state.get("agent2_done")),
+            "rules": bool(st.session_state.get("agent3_done")),
+        }
+        html = "<div style='text-align:center;margin:.4rem 0 1.4rem 0'>"
+        html += "".join(_stage_chip(lbl, key == stage, done.get(key, False)) for key, lbl in stages)
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
 
-    with left:
-        part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+    def _clean_issue_message(issue: Dict) -> str:
+        if not isinstance(issue, dict):
+            return str(issue)
+        line = str(issue.get("line", "") or "").strip()
+        msg = str(issue.get("message", "Please review this field.") or "Please review this field.").strip()
+        return f"{line}: {msg}" if line else msg
+
+    def _render_structure_result_clean(result: Dict) -> None:
+        """Doctor-facing structure result without the yellow warning card/hidden expander."""
+        if not result:
+            return
+        status = str(result.get("status", "warning") or "warning").lower()
+        issues = result.get("issues", []) or result.get("rule_issues", []) or []
+        blocking = bool(result.get("blocking")) or status == "block"
+        errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "error"]
+        warnings = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "warning"]
+        infos = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() not in {"error", "warning"}]
+        summary = str(result.get("summary", "Structure check completed.") or "Structure check completed.")
+
+        if blocking or errors:
+            status_text = "Blocked"
+            dot_color = "#c0392b"
+            title = "Structure check needs correction"
+        elif warnings:
+            status_text = "Review suggested"
+            dot_color = "#006940"
+            title = "Structure check completed"
+        else:
+            status_text = "Passed"
+            dot_color = "#006940"
+            title = "Structure check passed"
+
+        review_items = [_clean_issue_message(x) for x in (errors + warnings + infos)]
+        if not review_items:
+            review_items = ["No blocking input/form issue detected."]
+
+        review_html = "".join(f"<li>{escape(x)}</li>" for x in review_items[:8])
+        st.markdown(
+            f"""
+            <div style="max-width:760px;margin:0 auto 1.2rem auto;border:1px solid #d8e6dc;border-radius:18px;padding:1.25rem 1.35rem;background:#fff;box-shadow:0 10px 28px rgba(0,0,0,.04);">
+              <div style="text-align:center;">
+                <div style="width:18px;height:18px;border-radius:50%;background:{dot_color};display:inline-block;margin-bottom:.45rem;"></div>
+                <div style="font-size:1.35rem;font-weight:900;color:#10233f;">{escape(title)}</div>
+                <div style="font-weight:850;color:{dot_color};margin-top:.25rem;">Status: {escape(status_text)}</div>
+              </div>
+              <div style="margin-top:1rem;color:#415a4d;line-height:1.55;">{escape(summary)}</div>
+              <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
+                <b>Details</b>
+                <ul style="margin-top:.45rem;">{review_html}</ul>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def _get_current_cod_from_state() -> Tuple[List[Dict], List[Dict]]:
+        part1_chain, part2_conditions = build_structured_cod_from_form_state(fd)
+        if not part1_chain and fd.get("manual_part1_chain"):
+            part1_chain = fd.get("manual_part1_chain", []) or []
+        if not part2_conditions and fd.get("manual_part2_conditions"):
+            part2_conditions = fd.get("manual_part2_conditions", []) or []
+        save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+        return part1_chain, part2_conditions
 
     patient_info = {
         "age_years": fd.get("age_years", 0),
@@ -7048,71 +7126,82 @@ elif st.session_state.page == 4:
         "chronic_conditions": fd.get("chronic_conditions", []),
     }
 
-    with right:
-        # Direct continuous review workflow: no stepper, no intermediate placeholder pages.
-        # The doctor sees the checks in order on one screen.
+    stage = st.session_state.get("review_stage", "structure")
+    _render_review_stage_header(stage)
 
-        # 1) Structure Check
-        st.markdown("### Structure Check")
-        if st.button("Run Structure Check", type="primary", use_container_width=True):
-            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
-            with st.spinner("Checking the doctor input..."):
-                st.session_state.agent1_result = agent1_input_validation_with_llm(
-                    API_KEY,
-                    part1_chain,
-                    part2_conditions,
-                )
-            st.session_state.agent1_done = True
-            st.rerun()
+    # -------------------------------------------------------------------------
+    # Stage 1: Structure Check
+    # -------------------------------------------------------------------------
+    if stage == "structure":
+        st.markdown('<div class="section-title">Structure Check</div>', unsafe_allow_html=True)
+        part1_chain, part2_conditions = render_doctor_edit_panel(fd)
 
-        if st.session_state.get("agent1_result"):
-            a1 = st.session_state.get("agent1_result") or {}
-            if a1.get("blocking"):
-                st.error("Structure check: blocked. Please fix the highlighted cause fields.")
-            elif a1.get("warnings") or a1.get("issues"):
-                st.warning("Structure check: review suggested. You can continue if the warning is clinically acceptable.")
-            else:
-                st.success("Structure check passed.")
-            with st.expander("Structure check details"):
-                render_agent_result(a1, 1, "Structure Check")
+        c_run, c_next = st.columns([1, 1])
+        with c_run:
+            if st.button("Run Structure Check", type="primary", use_container_width=True):
+                save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                with st.spinner("Checking the doctor input..."):
+                    st.session_state.agent1_result = agent1_input_validation_with_llm(
+                        API_KEY,
+                        part1_chain,
+                        part2_conditions,
+                    )
+                st.session_state.agent1_done = True
+                st.rerun()
 
-        st.markdown("---")
+        a1 = st.session_state.get("agent1_result")
+        if a1:
+            _render_structure_result_clean(a1)
 
-        # 2) ICD Coding and doctor selection
-        st.markdown("### ICD Coding")
-        can_run_icd = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
-        if not st.session_state.get("agent1_done"):
-            st.info("Run Structure Check first.")
-        if st.button("Run ICD Coding", type="primary", disabled=not can_run_icd, use_container_width=True):
-            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
-            extracted = {
-                "part1_chain": part1_chain,
-                "part2_conditions": part2_conditions,
-            }
-            with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
-                coded_results = code_extracted_causes_with_claude(
-                    api_key=API_KEY,
-                    extracted=extracted,
-                    df_source=df_source,
-                    faiss_index=faiss_index,
-                    bm25=bm25,
-                    patient_info=patient_info,
-                )
-                coded_results = attach_who_verification_to_results(coded_results, release_id="2019")
-                st.session_state.icd_results = coded_results
-                st.session_state.agent2_result = agent2_candidate_validation_with_llm(
-                    API_KEY,
-                    coded_results,
-                    patient_info,
-                )
-            st.session_state.agent2_done = True
-            st.session_state.agent3_done = False
-            st.session_state.agent3_result = None
-            st.rerun()
+        can_continue = bool(st.session_state.get("agent1_done")) and not bool((a1 or {}).get("blocking"))
+        with c_next:
+            if st.button("Next → ICD Coding", type="primary", disabled=not can_continue, use_container_width=True):
+                st.session_state.review_stage = "icd"
+                st.rerun()
+
+    # -------------------------------------------------------------------------
+    # Stage 2: ICD Coding and doctor ICD choice
+    # -------------------------------------------------------------------------
+    elif stage == "icd":
+        st.markdown('<div class="section-title">ICD Coding</div>', unsafe_allow_html=True)
+        part1_chain, part2_conditions = _get_current_cod_from_state()
+
+        c_back, c_run, c_next = st.columns([1, 1.35, 1])
+        with c_back:
+            if st.button("← Structure", use_container_width=True):
+                st.session_state.review_stage = "structure"
+                st.rerun()
+        with c_run:
+            can_run_icd = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
+            if st.button("Run ICD Coding", type="primary", disabled=not can_run_icd, use_container_width=True):
+                save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                extracted = {
+                    "part1_chain": part1_chain,
+                    "part2_conditions": part2_conditions,
+                }
+                with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
+                    coded_results = code_extracted_causes_with_claude(
+                        api_key=API_KEY,
+                        extracted=extracted,
+                        df_source=df_source,
+                        faiss_index=faiss_index,
+                        bm25=bm25,
+                        patient_info=patient_info,
+                    )
+                    coded_results = attach_who_verification_to_results(coded_results, release_id="2019")
+                    st.session_state.icd_results = coded_results
+                    st.session_state.agent2_result = agent2_candidate_validation_with_llm(
+                        API_KEY,
+                        coded_results,
+                        patient_info,
+                    )
+                st.session_state.agent2_done = True
+                st.session_state.agent3_done = False
+                st.session_state.agent3_result = None
+                st.rerun()
 
         if st.session_state.get("agent2_result"):
-            with st.expander("ICD coding summary", expanded=False):
-                render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
+            render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
         if st.session_state.get("icd_results"):
             render_doctor_icd_choice_editor(
                 st.session_state.get("icd_results"),
@@ -7121,36 +7210,49 @@ elif st.session_state.page == 4:
                 patient_info,
             )
 
-        st.markdown("---")
+        with c_next:
+            can_continue_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
+            if st.button("Next → Table A/B", type="primary", disabled=not can_continue_rules, use_container_width=True):
+                st.session_state.review_stage = "rules"
+                st.rerun()
 
-        # 3) Table A/B rule trace and final certificate
-        st.markdown("### Table A/B Rule Trace")
-        can_run_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
-        if not st.session_state.get("agent2_done"):
-            st.info("Run ICD Coding first.")
-        if st.button("Run Table A/B Rule Trace", type="primary", disabled=not can_run_rules, use_container_width=True):
-            with st.spinner("Checking SP rules, Table A sequence, and Table B obvious-cause rules..."):
-                tabb_df = load_tabb_rules()
-                taba_df = load_taba_rules()
-                st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
-                    API_KEY,
-                    st.session_state.icd_results,
-                    tabb_df,
-                    taba_df,
-                )
-                st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
-                    "validation",
-                    st.session_state.icd_results.get("validation", {}),
-                )
-            st.session_state.agent3_done = True
-            st.rerun()
+    # -------------------------------------------------------------------------
+    # Stage 3: Table A/B Rule Trace
+    # -------------------------------------------------------------------------
+    elif stage == "rules":
+        st.markdown('<div class="section-title">Table A/B Rule Trace</div>', unsafe_allow_html=True)
+
+        c_back, c_run, c_final = st.columns([1, 1.4, 1])
+        with c_back:
+            if st.button("← ICD Coding", use_container_width=True):
+                st.session_state.review_stage = "icd"
+                st.rerun()
+        with c_run:
+            can_run_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
+            if st.button("Run Table A/B Rule Trace", type="primary", disabled=not can_run_rules, use_container_width=True):
+                with st.spinner("Checking SP rules, Table A sequence, and Table B obvious-cause rules..."):
+                    tabb_df = load_tabb_rules()
+                    taba_df = load_taba_rules()
+                    st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
+                        API_KEY,
+                        st.session_state.icd_results,
+                        tabb_df,
+                        taba_df,
+                    )
+                    st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
+                        "validation",
+                        st.session_state.icd_results.get("validation", {}),
+                    )
+                st.session_state.agent3_done = True
+                st.rerun()
 
         if st.session_state.get("agent3_result"):
             render_agent3_result(st.session_state.get("agent3_result"))
 
-        if st.button("Final Certificate", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True):
-            st.session_state.page = 5
-            st.rerun()
+        with c_final:
+            if st.button("Final Certificate", type="primary", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True):
+                st.session_state.page = 5
+                st.rerun()
 
 
 # =============================================================================
