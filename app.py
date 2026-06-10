@@ -332,12 +332,23 @@ section[data-testid="stSidebar"] .stTextInput input {
 }
 /* Smaller action buttons for the sequential agent workspace. */
 div[data-testid="stButton"] > button {
-  padding: .32rem .72rem !important;
-  font-size: .78rem !important;
-  min-height: 1.95rem !important;
+  padding: .45rem .72rem !important;
+  font-size: .86rem !important;
+  min-height: 3.05rem !important;
+  height: 3.05rem !important;
   border-radius: 8px !important;
   line-height: 1.15 !important;
-  width: auto !important;
+  width: 100% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-align: center !important;
+}
+div[data-testid="stButton"] > button p {
+  white-space: normal !important;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+  text-align: center !important;
 }
 .agent2-code-list {
   margin-top: .7rem;
@@ -7121,7 +7132,7 @@ elif st.session_state.page == 4:
     }
 
     stage = st.session_state.get("review_stage", "structure")
-    # Stage chips removed for a direct doctor-facing flow.
+    # Stage chips removed for a direct doctor-facing flow. Button CSS fixed for equal-sized action buttons.
 
     # -------------------------------------------------------------------------
     # Stage 1: Structure Check
@@ -7192,9 +7203,9 @@ elif st.session_state.page == 4:
             st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
             st.markdown("<div style='font-size:1.15rem;font-weight:900;color:#006940;margin-bottom:.65rem;'>ICD Coding</div>", unsafe_allow_html=True)
 
-            btn_back, btn_run, btn_next = st.columns([0.86, 1.12, 1.12], gap="small")
+            btn_back, btn_run, btn_next = st.columns(3, gap="small")
             with btn_back:
-                if st.button("← Structure", use_container_width=True, key="icd_back_to_structure_right"):
+                if st.button("← Back", use_container_width=True, key="icd_back_to_structure_right"):
                     st.session_state.review_stage = "structure"
                     st.rerun()
             with btn_run:
