@@ -7115,6 +7115,152 @@ elif st.session_state.page == 4:
             unsafe_allow_html=True,
         )
 
+
+    def _selected_quality_flags_from_rules(result: Dict) -> Tuple[bool, bool, Dict, Dict]:
+        """Return SP7/SP8 flags from the current rule result."""
+        result = result or {}
+        sp = result.get("sp_review", {}) or {}
+        quality = sp.get("sp7_sp8_quality", {}) or {}
+        sp7 = bool(quality.get("sp7_ill_defined"))
+        sp8 = bool(quality.get("sp8_unlikely_or_unacceptable"))
+        return sp7, sp8, sp, quality
+
+    def _one_part1_cause_from_results(results: Optional[Dict]) -> bool:
+        coded = (results or {}).get("coded_causes", []) or []
+        part1 = [x for x in coded if x.get("role") in {"immediate", "contributing", "underlying"}]
+        return len(part1) == 1
+
+    def _render_rules_result_simple(result: Dict) -> None:
+        """Compact doctor-facing Table A/B result. SP7/SP8 is shown on the next Quality Check page."""
+        if not result:
+            st.markdown(
+                """
+                <div style="border:1px solid #d8e6dc;border-radius:18px;padding:1.1rem 1.2rem;background:#fff;">
+                  Run the Table A/B check to select the tentative starting point.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+
+        status = str(result.get("status", "warning") or "warning").lower()
+        sp = result.get("sp_review", {}) or {}
+        taba = result.get("taba_sequence", {}) or {}
+        tabb = result.get("tabb_result", {}) or {}
+        sp_rule = str(sp.get("base_sp_rule", sp.get("sp_rule", "REVIEW")) or "REVIEW")
+        selected_line = str(sp.get("selected_line", "") or "")
+        selected_cause = str(sp.get("selected_cause", "") or "Not selected")
+        selected_code = str(sp.get("selected_code", "") or "Pending")
+        explanation = str(sp.get("explanation", "") or result.get("summary", "") or "")
+
+        if status == "block":
+            accent = "#c0392b"; bg = "#fff5f5"; border = "#e4a6a6"; icon = "✕"; status_text = "Blocked"
+        elif status == "warning":
+            accent = "#a66a00"; bg = "#fffaf0"; border = "#e7c46a"; icon = "⚠"; status_text = "Review suggested"
+        else:
+            accent = "#006940"; bg = "#ffffff"; border = "#d8e6dc"; icon = "●"; status_text = "Passed"
+
+        if sp_rule == "SP1":
+            rule_sentence = "SP1: only one Part I condition was entered, so it is treated as both immediate cause and tentative underlying cause."
+        elif sp_rule == "SP2":
+            rule_sentence = "SP2: one usable Part I line is treated as the tentative starting point."
+        elif sp_rule == "SP3":
+            rule_sentence = "SP3: Table A supports the full causal sequence."
+        elif sp_rule == "SP4":
+            rule_sentence = "SP4: Table A supports a partial sequence leading to line (a)."
+        elif sp_rule == "SP5":
+            rule_sentence = "SP5: Table A did not confirm a valid sequence, so the first-mentioned condition remains the review candidate."
+        elif "SP6" in (sp.get("rule_path", []) or []):
+            rule_sentence = "SP6: Table B found an obvious-cause relationship and shifted the tentative starting point."
+        else:
+            rule_sentence = explanation or "Manual review is recommended."
+
+        taba_links = taba.get("links") or []
+        if taba_links:
+            valid = bool(taba.get("valid_sequence"))
+            table_a_sentence = "Table A sequence accepted." if valid else "Table A sequence needs review."
+        else:
+            table_a_sentence = "No adjacent Table A link is needed for a single-cause certificate."
+
+        tabb_matches = (tabb.get("matches") or []) + (tabb.get("reverse_matches") or [])
+        if tabb_matches or sp.get("sp6_trace"):
+            table_b_sentence = "Table B found a post-selection relationship; review the selected starting point."
+        else:
+            table_b_sentence = "Table B found no obvious-cause shift."
+
+        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
+        st.markdown(
+            f"""
+            <div style="border:1px solid {border};border-radius:18px;padding:1.15rem 1.25rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
+              <div style="font-size:1.25rem;font-weight:900;color:#10233f;margin-bottom:.25rem;">
+                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Starting point selected
+              </div>
+              <div style="font-weight:900;color:{accent};margin-bottom:.9rem;">Status: {escape(status_text)}</div>
+              <div style="line-height:1.65;color:#172033;">
+                <b>Tentative UCOD:</b> {escape(selected_cause)} — <b>{escape(selected_code)}</b><br>
+                <b>Selected line:</b> {escape(line_label)}<br>
+                <b>Applied rule:</b> {escape(rule_sentence)}<br>
+                <b>Table A:</b> {escape(table_a_sentence)}<br>
+                <b>Table B:</b> {escape(table_b_sentence)}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def _render_quality_result_simple(result: Dict, icd_results: Dict) -> bool:
+        """Show SP7/SP8 doctor-facing quality decision. Returns True if final certificate should be blocked."""
+        if not result:
+            st.info("Run Table A/B first, then review the quality check.")
+            return True
+
+        sp7, sp8, sp, quality = _selected_quality_flags_from_rules(result)
+        selected_line = str(sp.get("selected_line", "") or quality.get("checked_line", "") or "a")
+        selected_cause = str(sp.get("selected_cause", "") or quality.get("checked_cause", "") or "Selected cause")
+        selected_code = str(sp.get("selected_code", "") or quality.get("checked_code", "") or "Pending")
+        only_one = _one_part1_cause_from_results(icd_results)
+        blocked = bool(sp7 or sp8)
+
+        if blocked:
+            accent = "#a66a00"; bg = "#fffaf0"; border = "#e7c46a"; icon = "⚠"; title = "Quality check needs correction"
+            status_text = "Doctor action required"
+            if sp7 and sp8:
+                finding = "The selected cause is ill-defined/terminal and is also flagged as unlikely or unacceptable as the underlying cause."
+            elif sp7:
+                finding = "The selected cause is ill-defined, vague, or a terminal mechanism."
+            else:
+                finding = "The selected cause is flagged as unlikely or unacceptable as the underlying cause."
+            if only_one:
+                action = "Because only line (a) is present, go back and replace the immediate cause with the specific disease, injury, or condition that started the chain."
+            else:
+                action = "Go back and correct the selected Part I line, or add the missing causal sequence before finalizing."
+        else:
+            accent = "#006940"; bg = "#ffffff"; border = "#d8e6dc"; icon = "●"; title = "Quality check passed"
+            status_text = "Passed"
+            finding = "The selected starting point is not ill-defined and is not marked as unacceptable for mortality coding."
+            action = "You may continue to the final certificate."
+
+        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else selected_line
+        st.markdown(
+            f"""
+            <div style="border:1px solid {border};border-radius:18px;padding:1.15rem 1.25rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
+              <div style="font-size:1.25rem;font-weight:900;color:#10233f;margin-bottom:.25rem;">
+                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> {escape(title)}
+              </div>
+              <div style="font-weight:900;color:{accent};margin-bottom:.9rem;">Status: {escape(status_text)}</div>
+              <div style="line-height:1.65;color:#172033;">
+                <b>Checked cause:</b> {escape(line_label)} — {escape(selected_cause)} ({escape(selected_code)})<br>
+                <b>SP7 ill-defined:</b> {'Yes' if sp7 else 'No'}<br>
+                <b>SP8 unacceptable/unlikely:</b> {'Yes' if sp8 else 'No'}<br><br>
+                <b>Finding:</b> {escape(finding)}<br>
+                <b>Doctor action:</b> {escape(action)}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return blocked
+
     def _get_current_cod_from_state() -> Tuple[List[Dict], List[Dict]]:
         part1_chain, part2_conditions = build_structured_cod_from_form_state(fd)
         if not part1_chain and fd.get("manual_part1_chain"):
@@ -7257,39 +7403,78 @@ elif st.session_state.page == 4:
     # Stage 3: Table A/B Rule Trace
     # -------------------------------------------------------------------------
     elif stage == "rules":
-        st.markdown('<div class="section-title">Table A/B Rule Trace</div>', unsafe_allow_html=True)
+        left_col, right_col = st.columns([1.62, 1.0], gap="large")
 
-        c_back, c_run, c_final = st.columns([1, 1.4, 1])
-        with c_back:
-            if st.button("← ICD Coding", use_container_width=True):
-                st.session_state.review_stage = "icd"
-                st.rerun()
-        with c_run:
-            can_run_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
-            if st.button("Run Table A/B Rule Trace", type="primary", disabled=not can_run_rules, use_container_width=True):
-                with st.spinner("Checking SP rules, Table A sequence, and Table B obvious-cause rules..."):
-                    tabb_df = load_tabb_rules()
-                    taba_df = load_taba_rules()
-                    st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
-                        API_KEY,
-                        st.session_state.icd_results,
-                        tabb_df,
-                        taba_df,
-                    )
-                    st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
-                        "validation",
-                        st.session_state.icd_results.get("validation", {}),
-                    )
-                st.session_state.agent3_done = True
-                st.rerun()
+        with left_col:
+            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
 
-        if st.session_state.get("agent3_result"):
-            render_agent3_result(st.session_state.get("agent3_result"))
+        with right_col:
+            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+            btn_back, btn_run, btn_next = st.columns(3, gap="small")
+            with btn_back:
+                if st.button("← ICD", use_container_width=True, key="rules_back_to_icd_right"):
+                    st.session_state.review_stage = "icd"
+                    st.rerun()
+            with btn_run:
+                can_run_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
+                if st.button("Run Table A/B", type="primary", disabled=not can_run_rules, use_container_width=True, key="run_table_ab_right_panel"):
+                    with st.spinner("Checking Table A/B rules..."):
+                        tabb_df = load_tabb_rules()
+                        taba_df = load_taba_rules()
+                        st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
+                            API_KEY,
+                            st.session_state.icd_results,
+                            tabb_df,
+                            taba_df,
+                        )
+                        st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
+                            "validation",
+                            st.session_state.icd_results.get("validation", {}),
+                        )
+                    st.session_state.agent3_done = True
+                    st.rerun()
+            with btn_next:
+                if st.button("Next → Quality", type="primary", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True, key="next_quality_right_panel"):
+                    st.session_state.review_stage = "quality"
+                    st.rerun()
 
-        with c_final:
-            if st.button("Final Certificate", type="primary", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True):
-                st.session_state.page = 5
-                st.rerun()
+            if st.session_state.get("agent3_result"):
+                st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+                _render_rules_result_simple(st.session_state.get("agent3_result"))
+
+    # -------------------------------------------------------------------------
+    # Stage 4: SP7/SP8 Quality Check
+    # -------------------------------------------------------------------------
+    elif stage == "quality":
+        left_col, right_col = st.columns([1.62, 1.0], gap="large")
+
+        with left_col:
+            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+
+        with right_col:
+            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:1.15rem;font-weight:900;color:#006940;margin-bottom:.65rem;'>Quality Check</div>", unsafe_allow_html=True)
+
+            result = st.session_state.get("agent3_result") or {}
+            quality_blocked = _render_quality_result_simple(result, st.session_state.get("icd_results") or {})
+
+            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+            btn_back, btn_edit, btn_final = st.columns(3, gap="small")
+            with btn_back:
+                if st.button("← Table A/B", use_container_width=True, key="quality_back_to_rules"):
+                    st.session_state.review_stage = "rules"
+                    st.rerun()
+            with btn_edit:
+                if st.button("Edit causes", type="primary", use_container_width=True, key="quality_edit_causes"):
+                    st.session_state.review_stage = "structure"
+                    st.rerun()
+            with btn_final:
+                if st.button("Final", type="primary", disabled=quality_blocked or not bool(st.session_state.get("agent3_done")), use_container_width=True, key="quality_to_final"):
+                    st.session_state.page = 5
+                    st.rerun()
+
 
 
 # =============================================================================
