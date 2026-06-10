@@ -7099,4 +7099,486 @@ elif st.session_state.page == 4:
 
             b_run, b_back = st.columns([1.2, 1])
             with b_run:
-                if st.button("Run ICD Coding", type="primary", use_container_width=T
+                if st.button("Run ICD Coding", type="primary", use_container_width=True):
+                    save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                    extracted = {
+                        "part1_chain": part1_chain,
+                        "part2_conditions": part2_conditions,
+                    }
+                    with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
+                        coded_results = code_extracted_causes_with_claude(
+                            api_key=API_KEY,
+                            extracted=extracted,
+                            df_source=df_source,
+                            faiss_index=faiss_index,
+                            bm25=bm25,
+                            patient_info=patient_info,
+                        )
+                        coded_results = attach_who_verification_to_results(coded_results, release_id="2019")
+                        st.session_state.icd_results = coded_results
+                        st.session_state.agent2_result = agent2_candidate_validation_with_llm(
+                            API_KEY,
+                            coded_results,
+                            patient_info,
+                        )
+                    st.session_state.agent2_done = True
+                    st.session_state.agent3_done = False
+                    st.session_state.agent3_result = None
+                    st.rerun()
+            with b_back:
+                if st.button("← Back", use_container_width=True):
+                    st.session_state.agent_step = 1
+                    st.rerun()
+
+            can_go_next = (
+                bool(st.session_state.get("agent2_done"))
+                and bool(st.session_state.get("icd_results"))
+                and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
+            )
+            if st.button("Next → Table A/B Rule Trace", disabled=not can_go_next, use_container_width=True):
+                st.session_state.agent_step = 3
+                st.rerun()
+
+        # Step 3 — Table A/B Rule Trace
+        elif st.session_state.agent_step == 3:
+            if not st.session_state.get("agent2_done") or not st.session_state.get("icd_results"):
+                st.warning("Run ICD Coding first.")
+                if st.button("Back to ICD Coding", use_container_width=True):
+                    st.session_state.agent_step = 2
+                    st.rerun()
+                st.stop()
+
+            st.subheader("Table A/B Rule Trace")
+            if st.session_state.get("agent3_result"):
+                render_agent3_result(st.session_state.get("agent3_result"))
+
+            b_run, b_back = st.columns([1.2, 1])
+            with b_run:
+                if st.button("Run Table A/B Rule Trace", type="primary", use_container_width=True):
+                    with st.spinner("Checking SP rules, Table A sequence, and Table B obvious-cause rules..."):
+                        tabb_df = load_tabb_rules()
+                        taba_df = load_taba_rules()
+                        st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
+                            API_KEY,
+                            st.session_state.icd_results,
+                            tabb_df,
+                            taba_df,
+                        )
+                        st.session_state.icd_results["validation"] = st.session_state.agent3_result.get(
+                            "validation",
+                            st.session_state.icd_results.get("validation", {}),
+                        )
+                    st.session_state.agent3_done = True
+                    st.rerun()
+            with b_back:
+                if st.button("← Back", use_container_width=True):
+                    st.session_state.agent_step = 2
+                    st.rerun()
+
+            b_final, b_new = st.columns([1.2, 1])
+            with b_final:
+                if st.button("Go to Final Certificate", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True):
+                    st.session_state.page = 5
+                    st.rerun()
+            with b_new:
+                if st.button("New Certificate", use_container_width=True):
+                    keys_to_remove = [k for k in st.session_state.keys() if str(k).startswith("code_edit_") or str(k).startswith("agent_part")]
+                    for k in keys_to_remove:
+                        del st.session_state[k]
+                    st.session_state.page = 1
+                    st.session_state.form_data = {}
+                    st.session_state.icd_results = None
+                    reset_agent_workflow(clear_codes=True)
+                    st.rerun()
+
+
+# =============================================================================
+# PAGE 5 — Final Certificate with PDF Download
+# =============================================================================
+elif st.session_state.page == 5:
+    render_steps(5)
+
+    fd = st.session_state.form_data
+    results = st.session_state.icd_results
+
+    if results is None:
+        st.error("No coded certificate data found.")
+        if st.button("Back to Review & Coding"):
+            st.session_state.page = 4
+            st.rerun()
+        st.stop()
+
+    coded_causes = results.get("coded_causes", [])
+    validation = results.get("validation", {})
+    concepts = results.get("concepts", {})
+
+    # Final certificate must always have a current SP/UCOD trace.
+    # This avoids a final PDF that shows only an immediate cause but does not
+    # explicitly show that SP1 also treats it as the underlying cause.
+    try:
+        if not validation.get("sp_review"):
+            sp_for_final = apply_sp_engine(API_KEY or "", concepts or {}, coded_causes)
+            validation = apply_sp_result_to_validation(validation, sp_for_final, coded_causes)
+            results["validation"] = validation
+            st.session_state.icd_results = results
+    except Exception as _sp_final_error:
+        validation = dict(validation or {})
+        issues_tmp = list(validation.get("coding_issues", []) or [])
+        issues_tmp.append(f"Final SP rule refresh failed: {type(_sp_final_error).__name__}: {_sp_final_error}")
+        validation["coding_issues"] = issues_tmp
+        validation["overall_quality"] = "Needs Review"
+
+    part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
+    part2 = [x for x in coded_causes if x["role"] == "other"]
+
+    cert_no = fd.get("cert_number") or f"DC-{datetime.date.today().year}-{fd.get('national_id', '')[-4:]}"
+    quality = validation.get("overall_quality", "Needs Review")
+    issues = validation.get("coding_issues", [])
+    who_notes = validation.get("who_notes", "")
+    underlying_code = validation.get("underlying_cause") or "Pending manual review"
+    underlying_text = validation.get("underlying_cause_text") or validation.get("starting_point_text") or "Not confirmed"
+    sp_rule_final = validation.get("sp_rule") or validation.get("starting_point_rule") or "REVIEW"
+    underlying_display = f"{underlying_text} — {underlying_code}" if underlying_text and underlying_text != "Not confirmed" else underlying_code
+
+    quality_color = {
+        "Excellent": "#006940",
+        "Good": "#2d7a4f",
+        "Needs Review": "#c0392b",
+    }.get(quality, "#888")
+
+    # ── PDF download (regenerate if certificate content/rules changed) ───────
+    pdf_cache_key = "pdf_bytes_cached"
+    pdf_signature = json.dumps({
+        "pdf_layout_version": "v6_ordered_cause_icd_interval_table",
+        "cert_no": cert_no,
+        "coded_causes": coded_causes,
+        "validation": validation,
+    }, ensure_ascii=False, sort_keys=True, default=str)
+    if pdf_cache_key not in st.session_state or st.session_state.get("pdf_signature") != pdf_signature:
+        try:
+            pdf_bytes = generate_certificate_pdf(
+                fd=fd,
+                coded_causes=coded_causes,
+                validation=validation,
+                hospital_name=hospital_name,
+                hospital_city=hospital_city,
+                doctor_name=doctor_name,
+            )
+            st.session_state[pdf_cache_key] = pdf_bytes
+            st.session_state["pdf_signature"] = pdf_signature
+        except Exception as e:
+            st.session_state[pdf_cache_key] = None
+            st.error(f"PDF generation failed: {e}")
+
+    pdf_bytes = st.session_state.get(pdf_cache_key)
+
+    # ── Top action bar ────────────────────────────────────────────────────────
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Final Death Certificate</div>', unsafe_allow_html=True)
+
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        st.markdown(
+            f'<div style="background:white;border:2px solid {quality_color};border-radius:8px;'
+            f'padding:.7rem 1rem;display:inline-block">'
+            f'<b style="color:{quality_color}">Validation: {escape(quality)}</b> &nbsp;|&nbsp; '
+            f'UCOD: <b>{escape(underlying_display)}</b> &nbsp;|&nbsp; '
+            f'Rule: <b>{escape(sp_rule_final)}</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with top_right:
+        if pdf_bytes:
+            st.download_button(
+                label="⬇ Download PDF",
+                data=pdf_bytes,
+                file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning("PDF unavailable")
+
+    st.markdown("---")
+
+    # ── Patient Information ───────────────────────────────────────────────────
+    st.markdown("### Patient Information")
+    p1, p2 = st.columns(2)
+    with p1:
+        st.write(f"**Full Name:** {fd.get('full_name', '—')}")
+        st.write(f"**National ID / Iqama:** {fd.get('national_id', '—')}")
+        st.write(f"**Nationality:** {fd.get('nationality', '—')}")
+        st.write(f"**Sex:** {fd.get('sex', '—')}")
+        st.write(f"**Age:** {fd.get('age_years', '—')} years")
+        st.write(f"**Date of Birth:** {fd.get('dob', '—')}")
+        st.write(f"**Marital Status:** {fd.get('marital_status', '—')}")
+        st.write(f"**Occupation:** {fd.get('occupation', '—')}")
+        st.write(f"**Address:** {fd.get('address', '—')}")
+    with p2:
+        st.write(f"**Date of Death:** {fd.get('dod', '—')}")
+        st.write(f"**Time of Death:** {fd.get('time_of_death', '—')}")
+        st.write(f"**Place of Death:** {fd.get('place_of_death', '—')}")
+        st.write(f"**Type of Death:** {fd.get('death_type', '—')}")
+        st.write(f"**Issue Date:** {fd.get('date_issued', '—')}")
+        st.write(f"**Certificate Number:** {cert_no}")
+        st.write(f"**Hospital Stay:** {fd.get('inpatient_days', '—')} days")
+        st.write(f"**Autopsy Required:** {fd.get('autopsy_required', '—')}")
+        st.write(f"**Recent Surgery:** {fd.get('had_surgery', '—')}")
+
+    st.markdown("---")
+
+    # ── Part I ────────────────────────────────────────────────────────────────
+    st.markdown("### Part I — Direct Causal Chain")
+    row_names = ["(a)", "(b)", "(c)", "(d)", "(e)"]
+
+    def _final_part1_role(i: int, total: int) -> str:
+        if total == 1 and i == 0:
+            return "Immediate / underlying (SP1)"
+        if i == 0:
+            return "Immediate cause"
+        if i == total - 1:
+            return "Underlying cause"
+        return "Due to / antecedent cause"
+
+    if part1:
+        table_rows = []
+        for i, item in enumerate(part1):
+            row_label = row_names[i] if i < len(row_names) else f"({i+1})"
+            table_rows.append({
+                "Line": row_label,
+                "Role": _final_part1_role(i, len(part1)),
+                "Cause of death": item.get("cause", "—"),
+                "ICD-10": item.get("code_formatted") or "Pending manual review",
+                "Interval": item.get("interval", "—"),
+                "Description": item.get("short_desc") or "Pending manual review",
+                "Status": item.get("selection_status", "—"),
+            })
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True)
+        if len(part1) == 1:
+            st.warning("SP1 note: only one Part I cause is entered; the same condition is treated as both immediate and underlying cause unless the doctor adds a lower causal condition.")
+    else:
+        st.info("No Part I causes available.")
+
+    # ── Part II ───────────────────────────────────────────────────────────────
+    st.markdown("### Part II — Other Significant Conditions")
+    part2_html = ""
+    for i, item in enumerate(part2, start=1):
+        code_display  = item.get("code_formatted") or "Pending manual review"
+        short_display = item.get("short_desc") or "Pending manual review"
+        long_display  = item.get("long_desc") or "Pending manual review"
+        status_display= item.get("selection_status", "—")
+
+        part2_html += f"""
+        <div class="final-block-secondary">
+            <div style="font-weight:700;color:#355c7d;margin-bottom:.35rem">
+                Other condition ({i})
+            </div>
+            <div style="font-size:.95rem;color:#1a2e1a;margin-bottom:.25rem">
+                {escape(item.get("cause", "—"))}
+            </div>
+            <div style="font-size:.82rem;color:#4b5f50;line-height:1.7">
+                <b>Interval:</b> {escape(item.get("interval", "—"))}<br>
+                <b>ICD-10 Code:</b> {escape(code_display)}<br>
+                <b>Disease Name:</b> {escape(short_display)}<br>
+                <b>Full Description:</b> {escape(long_display)}<br>
+                <b>Status:</b> {escape(status_display)}
+            </div>
+        </div>
+        """
+
+    if part2_html:
+        st.markdown(part2_html, unsafe_allow_html=True)
+    else:
+        st.info("No Part II conditions available.")
+
+    st.markdown("---")
+
+    # ── Underlying cause highlight ────────────────────────────────────────────
+    st.markdown(
+        f'<div style="background:#f0f4ff;border:2px solid #1a4a7a;border-radius:8px;'
+        f'padding:1rem 1.4rem;margin-bottom:1rem">'
+        f'<b style="color:#1a4a7a;font-size:.95rem">Underlying Cause / UCOD (for mortality statistics):</b> '
+        f'<span style="font-weight:800;font-size:1.02rem;color:#1a4a7a">{escape(underlying_display)}</span><br>'
+        f'<span style="font-size:.82rem;color:#355c7d">Starting-point rule: {escape(sp_rule_final)}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Validation Summary ────────────────────────────────────────────────────
+    st.markdown("### Validation Summary")
+    st.markdown(
+        f'<div style="background:white;border:2px solid {quality_color};border-radius:8px;'
+        f'padding:1rem 1.2rem;margin-bottom:1rem">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">'
+        f'<b style="color:{quality_color};font-size:.95rem">Validation Result — {escape(quality)}</b>'
+        f'<span style="background:{quality_color};color:white;border-radius:4px;padding:2px 10px;font-size:.78rem">'
+        f'UCOD: {escape(underlying_display)} · Rule: {escape(sp_rule_final)}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if issues:
+        for issue in issues:
+            st.error(issue)
+    else:
+        st.success("No validation issues detected.")
+
+    if who_notes:
+        st.info(who_notes)
+
+    st.markdown("---")
+
+    # ── Physician block ───────────────────────────────────────────────────────
+    st.markdown("### Physician / Hospital Information")
+    d1, d2 = st.columns(2)
+    with d1:
+        st.write(f"**Hospital Name:** {hospital_name}")
+        st.write(f"**City:** {hospital_city}")
+        st.write(f"**Certifying Physician:** {doctor_name or '________________________________'}")
+    with d2:
+        st.write("**Signature:** ______________________________")
+        st.write("**Official Stamp:** MOH Draft / Final Review")
+
+    st.markdown("---")
+
+    # ── Original narrative ────────────────────────────────────────────────────
+    st.markdown("### Original Narrative")
+    st.text_area(
+        "Cause Narrative Used for Extraction",
+        value=fd.get("free_text", ""),
+        height=180,
+        disabled=True,
+    )
+
+    with st.expander("Show extracted structure (debug)"):
+        st.json(concepts)
+
+    # ── Download buttons ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Download")
+
+    dl1, dl2 = st.columns(2)
+
+    if pdf_bytes:
+        with dl1:
+            st.download_button(
+                label="⬇ Download Final Certificate as PDF",
+                data=pdf_bytes,
+                file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+    final_lines = [
+        "FINAL DEATH CERTIFICATE",
+        f"Certificate No: {cert_no}",
+        "=" * 80,
+        f"Hospital: {hospital_name}",
+        f"City: {hospital_city}",
+        f"Certifying Physician: {doctor_name}",
+        "",
+        "PATIENT INFORMATION",
+        f"Full Name: {fd.get('full_name', '')}",
+        f"National ID / Iqama: {fd.get('national_id', '')}",
+        f"Nationality: {fd.get('nationality', '')}",
+        f"Sex: {fd.get('sex', '')}",
+        f"Age: {fd.get('age_years', '')} years",
+        f"Date of Birth: {fd.get('dob', '')}",
+        f"Date of Death: {fd.get('dod', '')}",
+        f"Time of Death: {fd.get('time_of_death', '')}",
+        f"Place of Death: {fd.get('place_of_death', '')}",
+        f"Type of Death: {fd.get('death_type', '')}",
+        f"Marital Status: {fd.get('marital_status', '')}",
+        f"Occupation: {fd.get('occupation', '')}",
+        f"Address: {fd.get('address', '')}",
+        "",
+        "PART I - DIRECT CAUSAL CHAIN",
+    ]
+
+    for i, item in enumerate(part1):
+        line_label = row_names[i] if i < len(row_names) else str(i + 1)
+        final_lines.append(
+            f"{line_label} {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
+            f"ICD: {item.get('code_formatted') or 'Pending manual review'} | "
+            f"{item.get('short_desc') or 'Pending manual review'}"
+        )
+
+    final_lines.append("")
+    final_lines.append("PART II - OTHER SIGNIFICANT CONDITIONS")
+    if part2:
+        for item in part2:
+            final_lines.append(
+                f"- {item.get('cause', '')} | interval: {item.get('interval', '—')} | "
+                f"ICD: {item.get('code_formatted') or 'Pending manual review'} | "
+                f"{item.get('short_desc') or 'Pending manual review'}"
+            )
+    else:
+        final_lines.append("None documented.")
+
+    final_lines += [
+        "",
+        "VALIDATION",
+        f"Overall Quality: {quality}",
+        f"Underlying Cause: {underlying_code}",
+        "",
+        "ISSUES",
+    ]
+
+    if issues:
+        for issue in issues:
+            final_lines.append(f"- {issue}")
+    else:
+        final_lines.append("- No issues detected.")
+
+    final_lines += [
+        "",
+        "WHO NOTE",
+        who_notes,
+        "",
+        "ORIGINAL NARRATIVE",
+        fd.get("free_text", ""),
+        "",
+        f"Issue Date: {fd.get('date_issued', '')}",
+        f"Physician: {doctor_name}",
+    ]
+
+    with dl2:
+        st.download_button(
+            label="⬇ Download Summary as Text (.txt)",
+            data="\n".join(final_lines).encode("utf-8"),
+            file_name=f"{sanitize_filename('death_certificate_' + cert_no)}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    b1, b2, b3, _ = st.columns([1, 1, 1.2, 5])
+
+    with b1:
+        if st.button("Back to Review", use_container_width=True):
+            st.session_state.page = 4
+            st.rerun()
+
+    with b2:
+        if st.button("Edit Narrative", use_container_width=True):
+            st.session_state.page = 3
+            st.rerun()
+
+    with b3:
+        if st.button("New Certificate"):
+            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("code_edit_")]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.session_state.page = 1
+            st.session_state.form_data = {}
+            st.session_state.icd_results = None
+            for k in list(st.session_state.keys()):
+                if k.startswith("part1_") or k.startswith("part2_"):
+                    del st.session_state[k]
+            # clear pdf cache too
+            for k in ["pdf_bytes_cached", "pdf_cert_no", "pdf_signature"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
