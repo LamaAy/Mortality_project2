@@ -5397,6 +5397,64 @@ def sp1_single_cause_warning(sp_review: Dict, coded_causes: List[Dict]) -> str:
         )
     return ""
 
+
+
+def _is_nature_of_injury_text(cause: str) -> bool:
+    """Detect injury/nature-of-injury wording that needs an external cause mechanism."""
+    txt = normalize_text_basic(cause)
+    terms = [
+        "broken", "fracture", "fractured", "injury", "trauma",
+        "wound", "laceration", "burn", "poisoning", "head injury",
+        "leg injury", "arm injury", "hip fracture", "femur fracture",
+    ]
+    return any(t in txt for t in terms)
+
+
+def _has_external_cause_text(cause: str) -> bool:
+    """Detect an external-cause mechanism already stated in the certificate text."""
+    txt = normalize_text_basic(cause)
+    terms = [
+        "fall", "fell", "traffic accident", "road traffic", "car accident",
+        "motor vehicle", "crash", "collision", "assault", "homicide",
+        "suicide", "drowning", "fire", "explosion", "complication of surgery",
+        "surgical complication", "accident",
+    ]
+    return any(t in txt for t in terms)
+
+
+def _certificate_has_external_cause(coded_causes: List[Dict]) -> bool:
+    """External-cause ICD-10 codes usually start with V, W, X, or Y."""
+    for item in coded_causes or []:
+        code = code_norm_for_rules(
+            item.get("doctor_selected_code")
+            or item.get("code_formatted")
+            or item.get("code")
+            or ""
+        )
+        cause = item.get("cause", "")
+        if code[:1] in {"V", "W", "X", "Y"} or _has_external_cause_text(cause):
+            return True
+    return False
+
+
+def _injury_without_external_cause(selected: Dict, coded_causes: List[Dict]) -> bool:
+    """Block injury/nature-of-injury as UCOD when no external cause mechanism is documented."""
+    if not selected:
+        return False
+    code = code_norm_for_rules(
+        selected.get("doctor_selected_code")
+        or selected.get("code_formatted")
+        or selected.get("code")
+        or ""
+    )
+    cause = selected.get("cause", "")
+    nature_code = code.startswith(("S", "T"))
+    nature_text = _is_nature_of_injury_text(cause)
+    selected_is_external = code[:1] in {"V", "W", "X", "Y"} or _has_external_cause_text(cause)
+    if (nature_code or nature_text) and not selected_is_external and not _certificate_has_external_cause(coded_causes):
+        return True
+    return False
+
 def apply_sp6_with_tabb(sp_review: Dict, coded_causes: List[Dict], tabb_df: pd.DataFrame) -> Dict:
     """SP6 direct-sequel loop using Table B/TABB. Current TSP is the address; DS underneath is the obvious cause."""
     out = dict(sp_review or {})
@@ -5474,13 +5532,19 @@ def apply_sp7_sp8_quality(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
         return out
 
     sp7 = sp7_is_hard_ill_defined(selected)
-    sp8 = is_excel_unlikely_to_cause_death(selected) or acceptable_main_bool(selected.get("acceptable_main", "")) is False
+    injury_missing_external = _injury_without_external_cause(selected, coded_causes)
+    sp8 = (
+        is_excel_unlikely_to_cause_death(selected)
+        or acceptable_main_bool(selected.get("acceptable_main", "")) is False
+        or injury_missing_external
+    )
     out["sp7_sp8_quality"] = {
         "sp7_ill_defined": bool(sp7),
         "sp8_unlikely_or_unacceptable": bool(sp8),
+        "injury_without_external_cause": bool(injury_missing_external),
         "checked_code": selected.get("code_formatted", ""),
         "checked_cause": selected.get("cause", ""),
-        "doctor_action_required": bool(sp7),
+        "doctor_action_required": bool(sp7 or injury_missing_external),
     }
     if sp7:
         msg = (
@@ -5495,7 +5559,14 @@ def apply_sp7_sp8_quality(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
         out["sp_rule"] = "SP7"
         out["doctor_action"] = "Go back and replace the ill-defined/terminal cause with a specific underlying disease or injury."
     if sp8:
-        out["warnings"].append("SP8: the selected starting point appears unlikely/trivial or not acceptable as UCOD. Coder review is required.")
+        if injury_missing_external:
+            out["warnings"].append(
+                "SP8 hard stop: the selected starting point appears to be an injury or nature-of-injury condition, but no external cause or mechanism is documented. Add the external cause, such as fall, road traffic accident, assault, or complication, before final certification."
+            )
+            out["blocking"] = True
+            out["doctor_action"] = "Go back and add the external cause/mechanism of injury, or replace the line with the documented disease or event that started the chain."
+        else:
+            out["warnings"].append("SP8: the selected starting point appears unlikely/trivial or not acceptable as UCOD. Coder review is required.")
         out["needs_manual_review"] = True
         if "SP8" not in out["rule_path"]:
             out["rule_path"].append("SP8")
@@ -7146,7 +7217,7 @@ elif st.session_state.page == 4:
         return len(part1) == 1
 
     def _render_rules_result_simple(result: Dict) -> None:
-        """Compact doctor-facing Table A/B result. SP7/SP8 is shown on the next Quality Check page."""
+        """Compact doctor-facing Table A/B + final SP7/SP8 gate result."""
         if not result:
             st.markdown(
                 """
@@ -7203,6 +7274,23 @@ elif st.session_state.page == 4:
         else:
             table_b_sentence = "Table B found no obvious-cause shift."
 
+        quality = sp.get("sp7_sp8_quality", {}) or {}
+        sp7 = bool(quality.get("sp7_ill_defined"))
+        sp8 = bool(quality.get("sp8_unlikely_or_unacceptable"))
+        injury_external = bool(quality.get("injury_without_external_cause"))
+        blocking_quality = bool(result.get("blocking") or sp.get("blocking") or sp7 or injury_external)
+        if blocking_quality:
+            quality_sentence = (
+                "Doctor action required: the selected starting point cannot be finalized. "
+                + ("It is ill-defined/terminal. " if sp7 else "")
+                + ("It appears to be an injury without a documented external cause/mechanism. " if injury_external else "")
+                + "Edit the certificate fields on the left, then rerun ICD Coding and Table A/B."
+            )
+        elif sp8:
+            quality_sentence = "Review suggested: the selected starting point may be unacceptable or unlikely as UCOD. Coder review is recommended."
+        else:
+            quality_sentence = "SP7/SP8 check passed: not ill-defined and not marked unacceptable."
+
         line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
         st.markdown(
             f"""
@@ -7216,7 +7304,8 @@ elif st.session_state.page == 4:
                 <b>Selected line:</b> {escape(line_label)}<br>
                 <b>Applied rule:</b> {escape(rule_sentence)}<br>
                 <b>Table A:</b> {escape(table_a_sentence)}<br>
-                <b>Table B:</b> {escape(table_b_sentence)}
+                <b>Table B:</b> {escape(table_b_sentence)}<br>
+                <b>Quality gate:</b> {escape(quality_sentence)}
               </div>
             </div>
             """,
@@ -7293,6 +7382,9 @@ elif st.session_state.page == 4:
     }
 
     stage = st.session_state.get("review_stage", "structure")
+    if stage == "quality":
+        st.session_state.review_stage = "rules"
+        stage = "rules"
     # Stage chips removed for a direct doctor-facing flow. Button CSS fixed for equal-sized action buttons.
 
     # -------------------------------------------------------------------------
@@ -7449,46 +7541,15 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_done = True
                     st.rerun()
             with btn_next:
-                if st.button("Next", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True, key="next_quality_right_panel"):
-                    st.session_state.review_stage = "quality"
+                current_rule_result = st.session_state.get("agent3_result") or {}
+                blocked_final = bool(current_rule_result.get("blocking") or ((current_rule_result.get("sp_review") or {}).get("blocking")))
+                if st.button("Next", disabled=(not bool(st.session_state.get("agent3_done")) or blocked_final), use_container_width=True, key="next_final_right_panel"):
+                    st.session_state.page = 5
                     st.rerun()
 
             if st.session_state.get("agent3_result"):
                 st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
                 _render_rules_result_simple(st.session_state.get("agent3_result"))
-
-    # -------------------------------------------------------------------------
-    # Stage 4: SP7/SP8 Quality Check
-    # -------------------------------------------------------------------------
-    elif stage == "quality":
-        left_col, right_col = st.columns([1.62, 1.0], gap="large")
-
-        with left_col:
-            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
-            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
-
-        with right_col:
-            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
-            st.markdown("<div style='font-size:1.15rem;font-weight:900;color:#006940;margin-bottom:.65rem;'>Quality Check</div>", unsafe_allow_html=True)
-
-            result = st.session_state.get("agent3_result") or {}
-            quality_blocked = _render_quality_result_simple(result, st.session_state.get("icd_results") or {})
-
-            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-            btn_back, btn_edit, btn_final = st.columns(3, gap="small")
-            with btn_back:
-                if st.button("Back", use_container_width=True, key="quality_back_to_rules"):
-                    st.session_state.review_stage = "rules"
-                    st.rerun()
-            with btn_edit:
-                if st.button("Edit causes", type="primary", use_container_width=True, key="quality_edit_causes"):
-                    st.session_state.review_stage = "structure"
-                    st.rerun()
-            with btn_final:
-                if st.button("Next", disabled=quality_blocked or not bool(st.session_state.get("agent3_done")), use_container_width=True, key="quality_to_final"):
-                    st.session_state.page = 5
-                    st.rerun()
-
 
 
 # =============================================================================
