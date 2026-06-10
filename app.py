@@ -2440,73 +2440,70 @@ def generate_certificate_pdf(
     part1 = [x for x in coded_causes if x["role"] in {"immediate", "contributing", "underlying"}]
     part2 = [x for x in coded_causes if x["role"] == "other"]
 
-    for i, item in enumerate(part1):
-        lbl = row_labels[i] if i < len(row_labels) else f"({i+1})"
-        if len(part1) == 1 and i == 0:
-            role_text = "Immediate and underlying cause of death (SP1)"
-        elif i == 0:
-            role_text = "Immediate cause of death"
-        elif i == len(part1) - 1:
-            role_text = "Underlying cause (lowest completed Part I line)"
-        else:
-            role_text = "Due to (antecedent cause)"
-        code_val  = item.get("code_formatted") or "— Pending review"
-        short_val = item.get("short_desc") or ""
-        cause_val = item.get("cause") or "—"
-        intv_val  = item.get("interval") or "—"
+    def _part1_role(i: int, total: int) -> str:
+        if total == 1 and i == 0:
+            return "Immediate / Underlying (SP1)"
+        if i == 0:
+            return "Immediate cause"
+        if i == total - 1:
+            return "Underlying cause"
+        return "Due to / antecedent cause"
 
-        block_data = [[
-            Paragraph(f"<b>{lbl} {role_text}</b>", h3_style),
-            Paragraph(f"<b>Interval:</b> {intv_val}", S("Normal", fontSize=8, textColor=MID_GRAY, fontName="Helvetica", alignment=TA_RIGHT)),
+    if part1:
+        part1_header = [[
+            Paragraph("Line / role", label_style),
+            Paragraph("Cause of death", label_style),
+            Paragraph("ICD-10", label_style),
+            Paragraph("Interval", label_style),
         ]]
-        block_header = Table(block_data, colWidths=[W * 0.7, W * 0.3])
-        block_header.setStyle(TableStyle([
-            ("BACKGROUND", (0,0),(-1,-1), LIGHT_GREEN),
-            ("TOPPADDING",    (0,0),(-1,-1), 4),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
-            ("LEFTPADDING",   (0,0),(-1,-1), 6),
-            ("RIGHTPADDING",  (0,0),(-1,-1), 6),
-            ("VALIGN", (0,0),(-1,-1), "MIDDLE"),
-        ]))
+        part1_rows = []
+        for i, item in enumerate(part1):
+            lbl = row_labels[i] if i < len(row_labels) else f"({i+1})"
+            role_text = _part1_role(i, len(part1))
+            code_val = item.get("code_formatted") or "Pending review"
+            intv_val = item.get("interval") or "—"
+            cause_val = item.get("cause") or "—"
+            short_val = item.get("short_desc") or ""
+            who_status = (item.get("who_api") or {}).get("message", "")
 
-        body_data = [[
-            Paragraph(cause_val, cause_style),
-            Paragraph(f"<b>{code_val}</b>", code_style),
-        ]]
-        body_table = Table(body_data, colWidths=[W * 0.62, W * 0.38])
-        body_table.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,-1), colors.white),
-            ("TOPPADDING",    (0,0),(-1,-1), 6),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
-            ("LEFTPADDING",   (0,0),(0,-1),  6),
-            ("LEFTPADDING",   (1,0),(1,-1),  10),
+            cause_html = f"<b>{escape(cause_val)}</b>"
+            if short_val:
+                cause_html += f"<br/><font size='7' color='#5a7060'>{escape(short_val)}</font>"
+            if who_status:
+                cause_html += f"<br/><font size='6.5' color='#5a7060'>WHO API: {escape(who_status)}</font>"
+
+            part1_rows.append([
+                Paragraph(f"<b>{escape(lbl)}</b><br/><font size='7'>{escape(role_text)}</font>", value_style),
+                Paragraph(cause_html, normal_style),
+                Paragraph(f"<b>{escape(code_val)}</b>", code_style),
+                Paragraph(escape(intv_val), value_style),
+            ])
+
+        part1_table = Table(part1_header + part1_rows,
+                            colWidths=[W * 0.20, W * 0.48, W * 0.16, W * 0.16],
+                            repeatRows=1)
+        part1_table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(-1,0), LIGHT_GREEN),
+            ("TEXTCOLOR", (0,0),(-1,0), GREEN),
+            ("ROWBACKGROUNDS", (0,1),(-1,-1), [colors.white, LIGHT_GRAY]),
+            ("GRID", (0,0),(-1,-1), 0.45, BORDER_CLR),
             ("VALIGN", (0,0),(-1,-1), "TOP"),
+            ("ALIGN", (2,1),(2,-1), "CENTER"),
+            ("ALIGN", (3,1),(3,-1), "CENTER"),
+            ("TOPPADDING", (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("LEFTPADDING", (0,0),(-1,-1), 5),
+            ("RIGHTPADDING", (0,0),(-1,-1), 5),
         ]))
+        story.append(part1_table)
 
-        if short_val:
-            desc_data = [[Paragraph(short_val, desc_style)]]
-            desc_table = Table(desc_data, colWidths=[W])
-            desc_table.setStyle(TableStyle([
-                ("BACKGROUND",    (0,0),(-1,-1), colors.white),
-                ("TOPPADDING",    (0,0),(-1,-1), 0),
-                ("BOTTOMPADDING", (0,0),(-1,-1), 5),
-                ("LEFTPADDING",   (0,0),(-1,-1), 6),
-            ]))
-            combined = KeepTogether([block_header, body_table, desc_table,
-                                     Table([[""]], colWidths=[W],
-                                           style=[("LINEBELOW",(0,0),(-1,-1),0.5,BORDER_CLR),
-                                                  ("TOPPADDING",(0,0),(-1,-1),0),
-                                                  ("BOTTOMPADDING",(0,0),(-1,-1),2)])])
-        else:
-            combined = KeepTogether([block_header, body_table,
-                                     Table([[""]], colWidths=[W],
-                                           style=[("LINEBELOW",(0,0),(-1,-1),0.5,BORDER_CLR),
-                                                  ("TOPPADDING",(0,0),(-1,-1),0),
-                                                  ("BOTTOMPADDING",(0,0),(-1,-1),2)])])
-        story.append(combined)
-        story.append(Spacer(1, 1 * mm))
-
-    if not part1:
+        if len(part1) == 1:
+            story.append(Spacer(1, 2 * mm))
+            story.append(Paragraph(
+                "SP1 note: only one Part I condition is documented, so the same condition is treated as both the immediate cause and the underlying cause unless a lower causal condition is added.",
+                small_style
+            ))
+    else:
         story.append(Paragraph("No Part I causes documented.", small_style))
 
     story.append(Spacer(1, 4 * mm))
@@ -6249,6 +6246,7 @@ elif st.session_state.page == 5:
     # ── PDF download (regenerate if certificate content/rules changed) ───────
     pdf_cache_key = "pdf_bytes_cached"
     pdf_signature = json.dumps({
+        "pdf_layout_version": "v6_ordered_cause_icd_interval_table",
         "cert_no": cert_no,
         "coded_causes": coded_causes,
         "validation": validation,
@@ -6329,43 +6327,32 @@ elif st.session_state.page == 5:
     # ── Part I ────────────────────────────────────────────────────────────────
     st.markdown("### Part I — Direct Causal Chain")
     row_names = ["(a)", "(b)", "(c)", "(d)", "(e)"]
-    part1_html = ""
-    for i, item in enumerate(part1):
-        row_label = row_names[i] if i < len(row_names) else f"({i+1})"
-        code_display  = item.get("code_formatted") or "Pending manual review"
-        short_display = item.get("short_desc") or "Pending manual review"
-        long_display  = item.get("long_desc") or "Pending manual review"
-        status_display= item.get("selection_status", "—")
 
-        if len(part1) == 1 and i == 0:
-            final_role_label = "Immediate and underlying cause (SP1)"
-        elif i == 0:
-            final_role_label = "Immediate cause"
-        elif i == len(part1) - 1:
-            final_role_label = "Underlying cause"
-        else:
-            final_role_label = "Due to"
+    def _final_part1_role(i: int, total: int) -> str:
+        if total == 1 and i == 0:
+            return "Immediate / underlying (SP1)"
+        if i == 0:
+            return "Immediate cause"
+        if i == total - 1:
+            return "Underlying cause"
+        return "Due to / antecedent cause"
 
-        part1_html += f"""
-        <div class="final-block">
-            <div style="font-weight:700;color:#006940;margin-bottom:.35rem">
-                {escape(row_label)} {escape(final_role_label)}
-            </div>
-            <div style="font-size:.95rem;color:#1a2e1a;margin-bottom:.25rem">
-                {escape(item.get("cause", "—"))}
-            </div>
-            <div style="font-size:.82rem;color:#4b5f50;line-height:1.7">
-                <b>Interval:</b> {escape(item.get("interval", "—"))}<br>
-                <b>ICD-10 Code:</b> {escape(code_display)}<br>
-                <b>Disease Name:</b> {escape(short_display)}<br>
-                <b>Full Description:</b> {escape(long_display)}<br>
-                <b>Status:</b> {escape(status_display)}
-            </div>
-        </div>
-        """
-
-    if part1_html:
-        st.markdown(part1_html, unsafe_allow_html=True)
+    if part1:
+        table_rows = []
+        for i, item in enumerate(part1):
+            row_label = row_names[i] if i < len(row_names) else f"({i+1})"
+            table_rows.append({
+                "Line": row_label,
+                "Role": _final_part1_role(i, len(part1)),
+                "Cause of death": item.get("cause", "—"),
+                "ICD-10": item.get("code_formatted") or "Pending manual review",
+                "Interval": item.get("interval", "—"),
+                "Description": item.get("short_desc") or "Pending manual review",
+                "Status": item.get("selection_status", "—"),
+            })
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True)
+        if len(part1) == 1:
+            st.warning("SP1 note: only one Part I cause is entered; the same condition is treated as both immediate and underlying cause unless the doctor adds a lower causal condition.")
     else:
         st.info("No Part I causes available.")
 
@@ -6588,7 +6575,7 @@ elif st.session_state.page == 5:
                 if k.startswith("part1_") or k.startswith("part2_"):
                     del st.session_state[k]
             # clear pdf cache too
-            for k in ["pdf_bytes_cached", "pdf_cert_no"]:
+            for k in ["pdf_bytes_cached", "pdf_cert_no", "pdf_signature"]:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
