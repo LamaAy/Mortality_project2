@@ -452,6 +452,21 @@ div[data-testid="stButton"] > button p {
   max-width: 100% !important;
   overflow-x: auto !important;
 }
+
+/* Review workflow button convention:
+   navigation buttons (Back/Next) stay green; the active run/action button is gold. */
+div[data-testid="stButton"] button[kind="primary"],
+div[data-testid="stButton"] button[data-testid="stBaseButton-primary"] {
+  background: linear-gradient(135deg, var(--gold), #b98d24) !important;
+  color: #ffffff !important;
+  border: none !important;
+  box-shadow: 0 3px 10px rgba(185,141,36,.30) !important;
+}
+div[data-testid="stButton"] button[kind="primary"]:hover,
+div[data-testid="stButton"] button[data-testid="stBaseButton-primary"]:hover {
+  box-shadow: 0 6px 16px rgba(185,141,36,.42) !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -7305,8 +7320,7 @@ elif st.session_state.page == 4:
                 a1_current = st.session_state.get("agent1_result")
                 can_continue_current = bool(st.session_state.get("agent1_done")) and not bool((a1_current or {}).get("blocking"))
                 next_clicked = st.button(
-                    "Next → ICD Coding",
-                    type="primary",
+                    "Next",
                     disabled=not can_continue_current,
                     use_container_width=True,
                     key="next_to_icd_direct",
@@ -7351,7 +7365,7 @@ elif st.session_state.page == 4:
 
             btn_back, btn_run, btn_next = st.columns(3, gap="small")
             with btn_back:
-                if st.button("← Back", use_container_width=True, key="icd_back_to_structure_right"):
+                if st.button("Back", use_container_width=True, key="icd_back_to_structure_right"):
                     st.session_state.review_stage = "structure"
                     st.rerun()
             with btn_run:
@@ -7384,7 +7398,7 @@ elif st.session_state.page == 4:
                     st.rerun()
             with btn_next:
                 can_continue_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
-                if st.button("Next → Table A/B", type="primary", disabled=not can_continue_rules, use_container_width=True, key="next_table_ab_right_panel"):
+                if st.button("Next", disabled=not can_continue_rules, use_container_width=True, key="next_table_ab_right_panel"):
                     st.session_state.review_stage = "rules"
                     st.rerun()
 
@@ -7413,7 +7427,7 @@ elif st.session_state.page == 4:
             st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
             btn_back, btn_run, btn_next = st.columns(3, gap="small")
             with btn_back:
-                if st.button("← ICD", use_container_width=True, key="rules_back_to_icd_right"):
+                if st.button("Back", use_container_width=True, key="rules_back_to_icd_right"):
                     st.session_state.review_stage = "icd"
                     st.rerun()
             with btn_run:
@@ -7435,7 +7449,7 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_done = True
                     st.rerun()
             with btn_next:
-                if st.button("Next → Quality", type="primary", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True, key="next_quality_right_panel"):
+                if st.button("Next", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True, key="next_quality_right_panel"):
                     st.session_state.review_stage = "quality"
                     st.rerun()
 
@@ -7463,7 +7477,7 @@ elif st.session_state.page == 4:
             st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
             btn_back, btn_edit, btn_final = st.columns(3, gap="small")
             with btn_back:
-                if st.button("← Table A/B", use_container_width=True, key="quality_back_to_rules"):
+                if st.button("Back", use_container_width=True, key="quality_back_to_rules"):
                     st.session_state.review_stage = "rules"
                     st.rerun()
             with btn_edit:
@@ -7471,7 +7485,7 @@ elif st.session_state.page == 4:
                     st.session_state.review_stage = "structure"
                     st.rerun()
             with btn_final:
-                if st.button("Final", type="primary", disabled=quality_blocked or not bool(st.session_state.get("agent3_done")), use_container_width=True, key="quality_to_final"):
+                if st.button("Next", disabled=quality_blocked or not bool(st.session_state.get("agent3_done")), use_container_width=True, key="quality_to_final"):
                     st.session_state.page = 5
                     st.rerun()
 
