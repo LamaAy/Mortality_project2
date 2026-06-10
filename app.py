@@ -652,16 +652,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# Header
+# Header removed for direct doctor workflow
 # =============================================================================
-st.markdown("""
-<div class="moh-header">
-  <div>
-    <h1>Electronic Death Certificate System</h1>
-    <p>Ministry of Health | Kingdom of Saudi Arabia</p>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+# The app starts directly from the active page content. The sidebar provides navigation.
 
 # =============================================================================
 # Secrets / IDs
@@ -2671,9 +2664,6 @@ with st.sidebar:
     if st.button("Medical History", use_container_width=True):
         st.session_state.page = 2
         st.rerun()
-    if st.button("Cause of Death", use_container_width=True):
-        st.session_state.page = 3
-        st.rerun()
     if st.button("Review & Coding", use_container_width=True):
         st.session_state.page = 4
         st.rerun()
@@ -2792,19 +2782,8 @@ if st.session_state["df_source"] is None:
 # Step bar
 # =============================================================================
 def render_steps(current: int):
-    labels = [
-        "Basic Information",
-        "Medical History",
-        "Cause of Death",
-        "Review & Coding",
-        "Final Certificate",
-    ]
-    html_s = '<div class="step-bar">'
-    for i, lbl in enumerate(labels, 1):
-        cls = "step active" if i == current else ("step done" if i < current else "step")
-        html_s += f'<div class="{cls}">{i}. {escape(lbl)}</div>'
-    html_s += "</div>"
-    st.markdown(html_s, unsafe_allow_html=True)
+    """Top wizard removed. Sidebar navigation and Review & Coding stages control flow."""
+    return
 
 
 def inline_note(message: str, level: str = "warning") -> None:
@@ -5480,7 +5459,7 @@ def apply_sp7_sp8_quality(sp_review: Dict, coded_causes: List[Dict]) -> Dict:
     if sp7:
         msg = (
             "SP7 hard stop: the selected starting point is ill-defined/vague or a terminal mechanism. "
-            "Go back to Cause of Death and enter the disease, injury, or condition that caused it."
+            "Return to Structure Check and enter the disease, injury, or condition that caused it."
         )
         out["warnings"].append(msg)
         out["needs_manual_review"] = True
@@ -5565,7 +5544,7 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
         "issues": rule_issues,
         "rule_issues": rule_issues,
         "condition_to_continue": (
-            "Go back to Cause of Death and fix the selected cause." if status == "block"
+            "Return to Structure Check and fix the selected cause." if status == "block"
             else ("Certificate can continue to final preview." if status == "pass" else "Manual coder review is recommended before final submission.")
         ),
         "blocking": status == "block",
@@ -6673,6 +6652,14 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
     st.markdown(html_out, unsafe_allow_html=True)
 
 # =============================================================================
+# Removed standalone Cause of Death page
+# =============================================================================
+if st.session_state.get("page") == 3:
+    st.session_state.page = 4
+    st.session_state.review_stage = "structure"
+    st.rerun()
+
+# =============================================================================
 # PAGE 1
 # =============================================================================
 if st.session_state.page == 1:
@@ -6791,7 +6778,8 @@ elif st.session_state.page == 2:
                 "was_pregnant": was_pregnant,
                 "chronic_conditions": chronic_conditions,
             })
-            st.session_state.page = 3
+            st.session_state.page = 4
+            st.session_state.review_stage = "structure"
             st.rerun()
 
 # =============================================================================
@@ -7625,8 +7613,9 @@ elif st.session_state.page == 5:
             st.rerun()
 
     with b2:
-        if st.button("Edit Narrative", use_container_width=True):
-            st.session_state.page = 3
+        if st.button("Edit Causes", use_container_width=True):
+            st.session_state.page = 4
+            st.session_state.review_stage = "structure"
             st.rerun()
 
     with b3:
