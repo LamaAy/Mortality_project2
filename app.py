@@ -5032,7 +5032,7 @@ def render_doctor_edit_panel(fd: Dict) -> Tuple[List[Dict], List[Dict]]:
 
     b_save, b_back = st.columns([1.4, 1])
     with b_save:
-        if st.button("Save Changes & Reset Agents", type="primary", use_container_width=True):
+        if st.button("Save changes & restart review", type="primary", use_container_width=True):
             save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
             reset_agent_workflow(clear_codes=True)
             st.success("Changes saved. Review workflow reset to Structure Check.")
@@ -6419,94 +6419,44 @@ def apply_doctor_icd_choices_to_results(
 
 
 def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd.DataFrame, api_key: str, patient_info: Dict) -> None:
-    """Doctor/coder-facing constrained ICD code chooser after WHO retrieval/tree.
+    """Compact doctor-facing ICD chooser.
 
-    v8 UI principle:
-    - Show the recommendation first.
-    - Separate candidate source, WHO verification, and local mortality validation.
-    - Keep retrieval/audit details hidden in an expander.
+    The doctor sees only the line, the final-code dropdown, selected-code details,
+    and concise WHO/local validation notes. Retrieval audit remains hidden.
     """
     if not coded_results or not coded_results.get("coded_causes"):
         return
 
     st.markdown("""
     <style>
-    .doctor-choice-card {
+    .direct-code-box {
         border: 1px solid #d8e6dc;
-        border-radius: 18px;
-        padding: 20px 22px;
+        border-radius: 16px;
+        padding: 14px 16px;
         background: #ffffff;
-        box-shadow: 0 10px 26px rgba(0,0,0,0.045);
-        margin: 16px 0 24px 0;
+        margin: 12px 0 18px 0;
     }
-    .doctor-choice-title {
-        font-size: 1.08rem;
-        font-weight: 800;
+    .direct-line-title {
+        font-size: 1.02rem;
+        font-weight: 850;
         color: #152033;
-        margin-bottom: 12px;
-    }
-    .doctor-mini-label {
-        color: #6b7280;
-        font-size: 0.78rem;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-bottom: 5px;
-    }
-    .doctor-big-code {
-        font-size: 1.03rem;
-        font-weight: 800;
-        color: #006940;
-        line-height: 1.45;
         margin-bottom: 8px;
     }
-    .doctor-muted {
-        color: #6b7280;
-        font-size: 0.92rem;
-        line-height: 1.45;
-    }
-    .source-chip-row { margin-top: 4px; margin-bottom: 6px; }
-    .source-chip {
-        display: inline-block;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-size: 0.78rem;
-        font-weight: 800;
-        margin: 0 6px 6px 0;
-        border: 1px solid #cfe3d5;
-        background: #eef8f2;
-        color: #006940;
-    }
-    .source-chip.warn {
-        border-color: #f4d796;
-        background: #fff8e6;
-        color: #9a6700;
-    }
-    .source-chip.bad {
-        border-color: #efb7b7;
-        background: #fff1f1;
-        color: #b42318;
-    }
-    .selected-detail-box {
+    .direct-selected-box {
         border-left: 4px solid #006940;
         background: #f7fbf8;
-        padding: 12px 14px;
+        padding: 10px 12px;
         border-radius: 10px;
         margin-top: 8px;
-        margin-bottom: 12px;
+        margin-bottom: 8px;
+        font-size: .93rem;
+        line-height: 1.45;
     }
+    .direct-note-ok { color:#006940; font-weight:700; font-size:.86rem; }
+    .direct-note-warn { color:#9a6700; font-weight:700; font-size:.86rem; }
+    .direct-note-bad { color:#b42318; font-weight:700; font-size:.86rem; }
     </style>
     """, unsafe_allow_html=True)
-
-    st.markdown("### Doctor ICD code selection")
-    st.caption(
-        "Choose the final ICD code for each cause. WHO candidates are shown when available. "
-        "The local ICD Excel file is used for mortality validation flags and fallback candidates."
-    )
-
-    def _shorten(text: str, n: int = 92) -> str:
-        text = str(text or "").strip().replace("\n", " ")
-        return text if len(text) <= n else text[: n - 3].rstrip() + "..."
 
     def _display_title(obj: Dict) -> str:
         return str(
@@ -6518,114 +6468,47 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
             or ""
         ).strip()
 
-    def _candidate_source_label(item: Dict) -> Tuple[str, str]:
-        src = str(item.get("retrieval_source", "") or "").strip()
-        lower = src.lower()
-        if "local fallback" in lower and "who" in lower:
-            return "WHO tree + local fallback", "warn"
-        if "local fallback" in lower or "excel" in lower:
-            return "Local ICD fallback", "warn"
-        if "who" in lower:
-            return "WHO ICD candidate", "ok"
-        return src or "ICD candidate", "ok"
-
-    def _who_status_label(who: Dict) -> Tuple[str, str, str]:
-        status = str(who.get("status", "not_checked") or "not_checked")
-        msg = str(who.get("message", "") or "")
+    def _who_compact(who: Dict) -> Tuple[str, str]:
+        status = str((who or {}).get("status", "not_checked") or "not_checked")
+        msg = str((who or {}).get("message", "") or "")
         if status in {"exact_verified", "verified"}:
-            return "WHO exact verified", msg or "WHO verified the selected ICD code.", "ok"
+            return "ok", msg or "WHO verified the selected ICD code."
         if status == "subcategory_verified":
-            return "WHO subcategory verified", msg or "WHO verified the nearest ICD subcategory.", "ok"
+            return "ok", msg or "WHO verified the nearest ICD subcategory."
         if status == "parent_verified":
-            return "WHO parent verified", msg or "WHO verified the broader parent category only.", "warn"
+            return "warn", msg or "WHO verified the broader parent category only."
         if status == "not_configured":
-            return "WHO not configured", msg or "WHO credentials are not configured.", "warn"
-        if status in {"failed", "not_checked"}:
-            return "WHO not verified", msg or "WHO verification is unavailable for this code.", "warn"
-        return f"WHO {status}", msg, "warn"
+            return "warn", msg or "WHO API is not configured."
+        return "warn", msg or "WHO verification is not available for this code."
 
-    def _mortality_validation_label(item: Dict, sex_value: str) -> Tuple[str, str, str]:
+    def _local_compact(item: Dict, sex_value: str) -> Tuple[str, str]:
         tmp = dict(item)
-        # Local match is a provenance signal; SP7/SP8/gender are the actual doctor-facing validation signals.
-        ill = False
-        unlikely = False
-        acc = None
-        gender_ok = True
         try:
-            ill = bool(sp7_is_hard_ill_defined(tmp) or is_excel_ill_defined(tmp))
-            unlikely = bool(is_excel_unlikely_to_cause_death(tmp))
-            acc = acceptable_main_bool(tmp.get("acceptable_main", ""))
-            gender_ok = is_gender_allowed(tmp.get("gender_restriction", ""), sex_value)
+            if bool(sp7_is_hard_ill_defined(tmp) or is_excel_ill_defined(tmp)):
+                return "bad", "Local mortality check: ill-defined/terminal mechanism — doctor should revise."
+            if acceptable_main_bool(tmp.get("acceptable_main", "")) is False or bool(is_excel_unlikely_to_cause_death(tmp)):
+                return "warn", "Local mortality check: may be unacceptable/unlikely as UCOD."
+            if not is_gender_allowed(tmp.get("gender_restriction", ""), sex_value):
+                return "bad", "Local mortality check: demographic conflict."
         except Exception:
             pass
-        if ill:
-            return "Blocked: ill-defined", "SP7: this looks like a vague/terminal mechanism; doctor should revise the cause.", "bad"
-        if acc is False or unlikely:
-            return "Needs review", "SP8/local validation: this code may be unacceptable or unlikely as UCOD.", "warn"
-        if not gender_ok:
-            return "Blocked: demographic conflict", "The selected code conflicts with the recorded sex/gender restriction.", "bad"
         if str(item.get("local_match_status", "")).lower() == "not_found":
-            return "Local flags not found", "No local Excel validation row was found; coder review is recommended.", "warn"
-        return "Mortality validation passed", "Not ill-defined; not marked unacceptable; no demographic conflict detected.", "ok"
+            return "warn", "Local mortality check: no Excel validation row found; coder review recommended."
+        return "ok", "Local mortality check: passed."
 
     sex_value = str((patient_info or {}).get("sex") or st.session_state.get("form_data", {}).get("sex", ""))
 
     for idx, item in enumerate(coded_results.get("coded_causes", []) or []):
         options, labels = _candidate_option_maps(item)
         current_code = str(item.get("code_formatted", "") or "").strip()
-        current_title = _display_title(item)
         default_code = current_code if current_code in options else (options[0] if options else "__REVIEW__")
         current_index = options.index(default_code) if default_code in options else 0
         line = html.escape(str(item.get("line", "") or ""))
         cause = html.escape(str(item.get("cause", "") or ""))
-        recommended_code_html = html.escape(current_code or "No code selected")
-        recommended_title_html = html.escape(current_title or "No title available")
 
-        source_label, source_class = _candidate_source_label(item)
-        who_label, who_msg, who_class = _who_status_label(item.get("who_api", {}) or {})
-        mort_label, mort_msg, mort_class = _mortality_validation_label(item, sex_value)
-
-        st.markdown(f"""
-        <div class="doctor-choice-card">
-          <div class="doctor-choice-title">Line {line} — {cause}</div>
-          <div class="doctor-mini-label">Recommended final ICD</div>
-          <div class="doctor-big-code">{recommended_code_html} — {recommended_title_html}</div>
-          <div class="source-chip-row">
-            <span class="source-chip {'' if source_class == 'ok' else source_class}">{html.escape(source_label)}</span>
-            <span class="source-chip {'' if who_class == 'ok' else who_class}">{html.escape(who_label)}</span>
-            <span class="source-chip {'' if mort_class == 'ok' else mort_class}">{html.escape(mort_label)}</span>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("**Candidate source**")
-            if source_class == "warn":
-                st.warning(source_label)
-            else:
-                st.success(source_label)
-            raw_src = str(item.get("retrieval_source", "") or "")
-            if raw_src and raw_src != source_label:
-                st.caption(raw_src)
-        with c2:
-            st.markdown("**WHO verification**")
-            if who_class == "ok":
-                st.success(who_msg)
-            else:
-                st.warning(who_msg)
-        with c3:
-            st.markdown("**Local mortality validation**")
-            if mort_class == "bad":
-                st.error(mort_msg)
-            elif mort_class == "warn":
-                st.warning(mort_msg)
-            else:
-                st.success(mort_msg)
-
-        st.markdown("**Doctor decision**")
+        st.markdown(f'<div class="direct-code-box"><div class="direct-line-title">Line {line} — {cause}</div>', unsafe_allow_html=True)
         choice = st.selectbox(
-            "Choose final ICD code for this line",
+            "Final ICD code",
             options,
             index=current_index,
             format_func=lambda x, labels=labels: labels.get(x, str(x)),
@@ -6634,41 +6517,41 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
 
         selected_obj = _candidate_by_code(item, choice) if choice != "__REVIEW__" else None
         if choice == "__REVIEW__":
-            st.warning("This line will be sent to manual coder review and no final ICD code will be assigned automatically.")
-            selected_title = "Needs coder review / no suitable code"
-            selected_source = "Manual coder review"
+            st.warning("This line will be sent to manual coder review; no automatic final ICD code will be assigned.")
         else:
-            selected_title = _display_title(selected_obj or {}) or _display_title(item)
-            selected_source = str((selected_obj or {}).get("source") or (selected_obj or {}).get("retrieval_source") or item.get("retrieval_source", "ICD candidate"))
+            selected_title = _display_title(selected_obj or {}) or _display_title(item) or "No title available"
             st.markdown(
                 f"""
-                <div class="selected-detail-box">
-                  <b>Selected code:</b> <code>{html.escape(choice)}</code><br>
-                  <b>Full title:</b> {html.escape(selected_title or 'No title available')}<br>
-                  <span class="doctor-muted"><b>Source:</b> {html.escape(selected_source or 'ICD candidate')}</span>
+                <div class="direct-selected-box">
+                  <b>Selected:</b> <code>{html.escape(choice)}</code> — {html.escape(selected_title)}
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        # Reason is required for any change or manual review.
+        who_class, who_msg = _who_compact(item.get("who_api", {}) or {})
+        local_class, local_msg = _local_compact(item, sex_value)
+        who_css = "direct-note-ok" if who_class == "ok" else "direct-note-warn"
+        local_css = "direct-note-bad" if local_class == "bad" else ("direct-note-warn" if local_class == "warn" else "direct-note-ok")
+        st.markdown(f'<div class="{who_css}">WHO: {html.escape(who_msg)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="{local_css}">{html.escape(local_msg)}</div>', unsafe_allow_html=True)
+
         if choice != current_code:
             st.text_area(
-                "Reason for changing the recommendation / requesting review",
+                "Reason for change / coder review",
                 key=f"doctor_icd_reason_{idx}",
-                placeholder="Example: The doctor did not specify upper lobe, so an unspecified bronchus/lung code is more appropriate.",
-                height=76,
+                placeholder="Required when changing the recommendation or requesting coder review.",
+                height=70,
             )
 
-        with st.expander("Show retrieval and audit details"):
-            st.markdown("**Candidate list**")
+        with st.expander("Details"):
             rows = []
             for rank, c in enumerate(item.get("candidates", []) or [], start=1):
                 rows.append({
                     "rank": rank,
                     "code": c.get("code_formatted", c.get("code", "")),
                     "title": c.get("short_desc", c.get("long_desc", "")),
-                    "candidate_source": c.get("source", c.get("retrieval_source", "")),
+                    "source": c.get("source", c.get("retrieval_source", "")),
                     "local_match": c.get("local_match_status", ""),
                     "local_code": c.get("local_code_formatted", ""),
                     "score": c.get("score", ""),
@@ -6677,24 +6560,20 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             else:
                 st.info("No candidate list is available for this line.")
-
-            st.markdown("**Audit summary**")
             st.json({
                 "entered_cause": item.get("cause", ""),
                 "recommended_code": current_code,
-                "recommended_title": current_title,
                 "retrieval_source": item.get("retrieval_source", ""),
                 "who_api": item.get("who_api", {}),
                 "local_match_status": item.get("local_match_status", "unknown"),
-                "local_code_formatted": item.get("local_code_formatted", ""),
                 "acceptable_main": item.get("acceptable_main", ""),
                 "gender_restriction": item.get("gender_restriction", ""),
                 "classification": item.get("classification", ""),
                 "note": item.get("note", ""),
             })
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    if st.button("Apply ICD choices and refresh WHO/Table A/B workflow", type="primary", use_container_width=True):
+    if st.button("Apply ICD choices", type="primary", use_container_width=True):
         updated, problems = apply_doctor_icd_choices_to_results(coded_results, df_source, release_id="2019")
         if problems:
             for p in problems:
@@ -6705,9 +6584,8 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
         st.session_state.agent2_done = True
         st.session_state.agent3_done = False
         st.session_state.agent3_result = None
-        st.success("Doctor ICD choices were applied. Please run the Table A/B Rule Trace again.")
+        st.success("ICD choices were applied. Continue to Table A/B Rule Trace.")
         st.rerun()
-
 
 def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> None:
     """ICD Coding card for WHO retrieval/tree plus Excel validation flags."""
@@ -7117,7 +6995,7 @@ elif st.session_state.page == 3:
             st.rerun()
     with b2:
         can_analyze = bool(precheck["part1_chain"]) and not bool(blocking_issues)
-        if st.button("Open Review Workflow", use_container_width=True, type="primary", disabled=(not can_analyze)):
+        if st.button("Start Review & Coding", use_container_width=True, type="primary", disabled=(not can_analyze)):
             if not precheck["part1_chain"]:
                 st.error("Please enter at least one Part I cause.")
             elif st.session_state.df_source is None:
@@ -7148,7 +7026,7 @@ elif st.session_state.page == 3:
                 st.rerun()
 
 # =============================================================================
-# PAGE 4 — Sequential LLM Agent Workflow
+# PAGE 4 — Review & Coding Workflow
 # =============================================================================
 elif st.session_state.page == 4:
     render_steps(4)
@@ -7183,7 +7061,7 @@ elif st.session_state.page == 4:
     if "agent_step" not in st.session_state:
         st.session_state.agent_step = 1
 
-    st.markdown('<div class="section-title">Review & Coding — Sequential LLM Agents</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Review & Coding</div>', unsafe_allow_html=True)
     # Compact workflow page header only; explanatory caption removed for cleaner UI.
 
     left, right = st.columns([1.35, 1.0], gap="large")
@@ -7199,45 +7077,18 @@ elif st.session_state.page == 4:
     }
 
     with right:
-        st.markdown('<div class="agent-workspace-title">Rule-Guided Review</div>', unsafe_allow_html=True)
+        st.markdown('<div class="agent-workspace-title">Review workflow</div>', unsafe_allow_html=True)
         render_agent_stepper(int(st.session_state.get("agent_step", 1)))
 
-        # ------------------------------------------------------------------
-        # Structure Check: Input validation
-        # ------------------------------------------------------------------
+        # Step 1 — Structure Check
         if st.session_state.agent_step == 1:
-            render_agent_card_header(
-                1,
-                "Structure Check",
-                "Checks Part I / Part II structure before retrieval: empty lines, skipped lines, multiple causes, duplicate causes, intervals, and sequence plausibility.",
-                state="active",
-            )
-            st.markdown(
-                """
-                <div class="agent-checklist">
-                <b>This step validates:</b>
-                <ul>
-                  <li>Part I is not empty</li>
-                  <li>No skipped Part I lines</li>
-                  <li>One disease or condition per line</li>
-                  <li>Intervals are understandable</li>
-                  <li>No duplicated causal-chain entries</li>
-                </ul>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="agent-condition"><b>Condition to unlock ICD Coding:</b><br>No blocking input/form errors.</div>',
-                unsafe_allow_html=True,
-            )
-            render_agent_prompt_box(AGENT1_SYSTEM_PROMPT)
+            st.subheader("Structure Check")
+            if st.session_state.get("agent1_result"):
+                render_agent_result(st.session_state.get("agent1_result"), 1, "Structure Check")
 
-            render_agent_result(st.session_state.get("agent1_result"), 1, "Structure Check", "Run the Structure Check to validate the doctor input.")
-
-            if st.button("Run Structure Check", type="primary"):
+            if st.button("Run Structure Check", type="primary", use_container_width=True):
                 save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
-                with st.spinner("Structure Check is reviewing the doctor input..."):
+                with st.spinner("Checking the doctor input..."):
                     st.session_state.agent1_result = agent1_input_validation_with_llm(
                         API_KEY,
                         part1_chain,
@@ -7247,51 +7098,22 @@ elif st.session_state.page == 4:
                 st.rerun()
 
             can_go_next = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
-            if st.button("Next → ICD Coding", disabled=not can_go_next):
+            if st.button("Next → ICD Coding", disabled=not can_go_next, use_container_width=True):
                 st.session_state.agent_step = 2
                 st.rerun()
 
-            close_agent_card()
-
-        # ------------------------------------------------------------------
-        # ICD Coding: ICD retrieval and candidate validation
-        # ------------------------------------------------------------------
+        # Step 2 — ICD Coding
         elif st.session_state.agent_step == 2:
             if not st.session_state.get("agent1_done"):
-                st.warning("Run the Structure Check first.")
-                if st.button("Back to Structure Check"):
+                st.warning("Run Structure Check first.")
+                if st.button("Back to Structure Check", use_container_width=True):
                     st.session_state.agent_step = 1
                     st.rerun()
                 st.stop()
 
-            render_agent_card_header(
-                2,
-                "ICD Coding",
-                "Runs WHO ICD retrieval/tree first, then uses Excel/local metadata only for mortality validation flags.",
-                state="active",
-            )
-            st.markdown(
-                """
-                <div class="agent-checklist">
-                <b>This step validates:</b>
-                <ul>
-                  <li>BM25 + FAISS candidate retrieval</li>
-                  <li>Selected code exists in the ICD Excel source</li>
-                  <li>Claude selected only from retrieved candidates</li>
-                  <li>AcceptableMain, gender restriction, vague/R-code flags</li>
-                  <li>Missing-code/manual-review conditions</li>
-                </ul>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="agent-condition"><b>Condition to unlock Table A/B Rule Trace:</b><br>At least one ICD-coded Part I chain exists and no missing-code error is present.</div>',
-                unsafe_allow_html=True,
-            )
-            render_agent_prompt_box(AGENT2_SYSTEM_PROMPT)
-
-            render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
+            st.subheader("ICD Coding")
+            if st.session_state.get("agent2_result"):
+                render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
             if st.session_state.get("icd_results"):
                 render_doctor_icd_choice_editor(
                     st.session_state.get("icd_results"),
@@ -7300,15 +7122,15 @@ elif st.session_state.page == 4:
                     patient_info,
                 )
 
-            b_run, b_back = st.columns([1.4, 1])
+            b_run, b_back = st.columns([1.2, 1])
             with b_run:
-                if st.button("Run ICD Coding", type="primary"):
+                if st.button("Run ICD Coding", type="primary", use_container_width=True):
                     save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
                     extracted = {
                         "part1_chain": part1_chain,
                         "part2_conditions": part2_conditions,
                     }
-                    with st.spinner("ICD Coding is retrieving WHO ICD candidates/tree and matching Excel validation flags..."):
+                    with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
                         coded_results = code_extracted_causes_with_claude(
                             api_key=API_KEY,
                             extracted=extracted,
@@ -7329,42 +7151,36 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_result = None
                     st.rerun()
             with b_back:
-                if st.button("← Back to Structure Check"):
+                if st.button("← Back", use_container_width=True):
                     st.session_state.agent_step = 1
                     st.rerun()
-
-            # Compact UI: ICD candidate tables are hidden here.
-            # The selected codes remain stored in st.session_state.icd_results and appear on the final certificate page.
 
             can_go_next = (
                 bool(st.session_state.get("agent2_done"))
                 and bool(st.session_state.get("icd_results"))
                 and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
             )
-            if st.button("Next → Table A/B Rule Trace", disabled=not can_go_next):
+            if st.button("Next → Table A/B Rule Trace", disabled=not can_go_next, use_container_width=True):
                 st.session_state.agent_step = 3
                 st.rerun()
 
-            close_agent_card()
-
-        # ------------------------------------------------------------------
-        # Table A/B Rule Trace: Mortality sequence / WHO / TABB validation
-        # ------------------------------------------------------------------
+        # Step 3 — Table A/B Rule Trace
         elif st.session_state.agent_step == 3:
             if not st.session_state.get("agent2_done") or not st.session_state.get("icd_results"):
                 st.warning("Run ICD Coding first.")
-                if st.button("Back to ICD Coding"):
+                if st.button("Back to ICD Coding", use_container_width=True):
                     st.session_state.agent_step = 2
                     st.rerun()
                 st.stop()
 
-            # Agent 3 uses one compact square that contains both the title and the output.
-            render_agent3_result(st.session_state.get("agent3_result"))
+            st.subheader("Table A/B Rule Trace")
+            if st.session_state.get("agent3_result"):
+                render_agent3_result(st.session_state.get("agent3_result"))
 
-            b_run, b_back = st.columns([1.4, 1])
+            b_run, b_back = st.columns([1.2, 1])
             with b_run:
-                if st.button("Run Table A/B Rule Trace", type="primary"):
-                    with st.spinner("Table A/B Rule Trace is reviewing SP rules, Table A sequence checks, and Table B obvious-cause rules..."):
+                if st.button("Run Table A/B Rule Trace", type="primary", use_container_width=True):
+                    with st.spinner("Checking SP rules, Table A sequence, and Table B obvious-cause rules..."):
                         tabb_df = load_tabb_rules()
                         taba_df = load_taba_rules()
                         st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
@@ -7380,22 +7196,17 @@ elif st.session_state.page == 4:
                     st.session_state.agent3_done = True
                     st.rerun()
             with b_back:
-                if st.button("← Back to ICD Coding"):
+                if st.button("← Back", use_container_width=True):
                     st.session_state.agent_step = 2
                     st.rerun()
 
-            # Agent 3 result is rendered above the run/back controls in one square.
-
-            # Compact UI: final coded-cause tables are hidden here, but SP rule/line are shown inside the Agent 3 square.
-            # The final certificate page keeps the complete coded result for review/download.
-
-            b_final, b_new = st.columns([1.4, 1])
+            b_final, b_new = st.columns([1.2, 1])
             with b_final:
-                if st.button("Go to Final Certificate", disabled=not bool(st.session_state.get("agent3_done"))):
+                if st.button("Go to Final Certificate", disabled=not bool(st.session_state.get("agent3_done")), use_container_width=True):
                     st.session_state.page = 5
                     st.rerun()
             with b_new:
-                if st.button("New Certificate"):
+                if st.button("New Certificate", use_container_width=True):
                     keys_to_remove = [k for k in st.session_state.keys() if str(k).startswith("code_edit_") or str(k).startswith("agent_part")]
                     for k in keys_to_remove:
                         del st.session_state[k]
@@ -7405,7 +7216,6 @@ elif st.session_state.page == 4:
                     reset_agent_workflow(clear_codes=True)
                     st.rerun()
 
-            close_agent_card()
 
 # =============================================================================
 # PAGE 5 — Final Certificate with PDF Download
