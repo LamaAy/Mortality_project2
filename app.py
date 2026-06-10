@@ -3493,11 +3493,12 @@ Task:
 Review ICD-10 candidate retrieval and selected ICD codes.
 
 Strict rules:
-- The Excel/metadata ICD rows are the only coding source of truth.
+- WHO ICD retrieval/tree candidates are the selectable coding source when available.
+- Excel/metadata rows are used for mortality-validation flags, not as the primary candidate source unless WHO retrieval fails.
 - Do not invent ICD codes.
 - Do not suggest codes that are not listed in the retrieved candidates.
 - Review whether the selected code is plausible for the doctor's cause text.
-- Review AcceptableMain, gender restrictions, vague/R-code issues, and manual-review flags.
+- Review AcceptableMain, gender restrictions, vague/R-code issues, local match status, and manual-review flags.
 - Return concise doctor-facing guidance.
 - Return only valid JSON.
 
@@ -5586,6 +5587,996 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     coded_results["validation"] = validation
     return result
 
+
+
+# =============================================================================
+# V7 OVERRIDES — WHO ICD retrieval/tree first; Excel kept for mortality flags
+# =============================================================================
+# Design:
+#   1) WHO ICD browser/API is used to retrieve ICD-10 candidates and tree context.
+#   2) Excel/local file is used after code selection for mortality validation flags
+#      such as ill-defined, unacceptable UCOD, gender restriction, and local notes.
+#   3) If WHO free-text retrieval is unavailable, the app falls back to local Excel
+#      retrieval but labels the fallback explicitly in the UI/audit trace.
+
+WHO_BROWSER_BASE = "https://icd.who.int/browse10"
+WHO_API_BASE = "https://id.who.int/icd"
+
+
+def _strip_html_text(value: str) -> str:
+    s = str(value or "")
+    s = re.sub(r"<\s*br\s*/?>", " ", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _safe_code_display(code: str) -> str:
+    c = str(code or "").strip().upper().replace(" ", "")
+    c = c.replace("-", "-")
+    return c
+
+
+def build_who_icd10_attempt_codes(local_code: str) -> List[str]:
+    """
+    Build WHO ICD-10 lookup attempts from a local/detailed ICD code.
+    Example: C34.90 -> C34.90, C3490, C34.9, C349, C34
+    """
+    raw = str(local_code or "").strip().upper().replace(" ", "")
+    nodot = code_norm_for_rules(raw)
+    attempts: List[str] = []
+
+    def add(x: str):
+        x = str(x or "").strip().upper()
+        if x and x not in attempts:
+            attempts.append(x)
+
+    add(raw)
+    add(nodot)
+    if len(nodot) >= 4 and nodot[0].isalpha():
+        add(nodot[:3] + "." + nodot[3])
+        add(nodot[:4])
+    if len(nodot) >= 3:
+        add(nodot[:3])
+    return attempts
+
+
+def _who_title_from_json(info: Dict) -> str:
+    title = info.get("title") or info.get("Title") or info.get("label") or info.get("Label") or ""
+    if isinstance(title, dict):
+        title = title.get("@value") or title.get("value") or title.get("label") or str(title)
+    return _strip_html_text(title)
+
+
+def _extract_code_from_any_dict(d: Dict) -> str:
+    for k in ["code", "Code", "theCode", "TheCode", "id", "ID", "ConceptId", "conceptId", "@id"]:
+        v = str(d.get(k, "") or "")
+        m = re.search(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?)\b", v.upper())
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _candidate_rank_adjustment_for_query(code: str, title: str, query: str) -> float:
+    q = normalize_text_basic(query)
+    text = normalize_text_basic(f"{code} {title}")
+    code_norm = code_norm_for_rules(code)
+    score = 0.0
+    if q and q in text:
+        score += 2.0
+    q_tokens = [t for t in tokenize(q) if t not in STOPWORDS]
+    row_tokens = set(tokenize(text))
+    score += 0.25 * len(set(q_tokens) & row_tokens)
+    if "lung cancer" in q or ("lung" in q and "cancer" in q) or "bronchogenic carcinoma" in q:
+        if code_norm.startswith("C34"):
+            score += 10.0
+        if code_norm.startswith(("C7A", "D3A", "A52", "J", "B", "D14")):
+            score -= 4.0
+        site_terms = ["upper", "lower", "middle", "lobe", "main bronchus"]
+        if not any(t in q for t in site_terms):
+            if code_norm.startswith("C349") or "unspecified" in text or "unsp" in text:
+                score += 2.0
+            if any(t in text for t in ["upper lobe", "lower lobe", "middle lobe", "main bronchus"]):
+                score -= 1.0
+    return score
+
+
+def _local_row_for_selected_code(df_source: pd.DataFrame, code: str) -> Optional[pd.Series]:
+    """Find local Excel row for an exact, subcategory, parent, or local-child version of a WHO code."""
+    if df_source is None or getattr(df_source, "empty", True) or not str(code or "").strip():
+        return None
+    norm = code_norm_for_rules(code)
+    # Exact match first.
+    row = get_row_by_code(df_source, code)
+    if row is not None:
+        return row
+    # WHO dotted subcategory without local extension: C34.9 -> local C34.90 if present.
+    try:
+        lookup = df_source.get("lookup_code")
+        if lookup is not None:
+            exact = df_source[lookup.astype(str).str.upper() == norm]
+            if not exact.empty:
+                return exact.iloc[0]
+            # if selected code is 4 chars, prefer local detailed descendants beginning with this subcategory
+            if len(norm) == 4:
+                child = df_source[lookup.astype(str).str.upper().str.startswith(norm)]
+                if not child.empty:
+                    # prefer .0/.9 unspecified local residuals for validation metadata
+                    scored = []
+                    for idx, r in child.iterrows():
+                        txt = normalize_text_basic(f"{r.get('CodeFormatted','')} {r.get('ShortDesc','')} {r.get('LongDesc','')}")
+                        s = 0
+                        if "unspecified" in txt or "unsp" in txt:
+                            s += 2
+                        scored.append((s, idx))
+                    scored.sort(reverse=True)
+                    return df_source.loc[scored[0][1]]
+            # parent category fallback
+            if len(norm) >= 3:
+                parent = norm[:3]
+                parent_rows = df_source[lookup.astype(str).str.upper().str.startswith(parent)]
+                if not parent_rows.empty:
+                    return parent_rows.iloc[0]
+    except Exception:
+        pass
+    return None
+
+
+def _local_flags_for_selected_code(df_source: pd.DataFrame, code: str) -> Dict:
+    row = _local_row_for_selected_code(df_source, code)
+    if row is None:
+        return {
+            "local_match_status": "not_found",
+            "acceptable_main": "Unknown",
+            "gender_restriction": "",
+            "classification": "",
+            "note": "",
+            "local_code_formatted": "",
+            "local_short_desc": "",
+            "local_long_desc": "",
+        }
+    return {
+        "local_match_status": "found",
+        "acceptable_main": str(row.get("AcceptableMain", "Unknown")),
+        "gender_restriction": str(row.get("GenderRestriction", "")),
+        "classification": str(row.get("Classification", "")),
+        "note": str(row.get("Note", "")),
+        "local_code_formatted": str(row.get("CodeFormatted", "")),
+        "local_short_desc": str(row.get("ShortDesc", "")),
+        "local_long_desc": str(row.get("LongDesc", "")),
+    }
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def who_browser_get_children_cached(code: str, release_id: str = "2019") -> List[Dict]:
+    """Fetch ICD-10 children from the WHO ICD-10 browser tree, no OAuth required."""
+    import requests
+    code = str(code or "").strip().upper()
+    if not code:
+        return []
+    url = f"{WHO_BROWSER_BASE}/{release_id}/en/JsonGetChildrenConcepts"
+    params = {"ConceptId": code, "useHtml": "false", "showAdoptedChildren": "true"}
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    rows = data if isinstance(data, list) else data.get("children", data.get("Children", []))
+    out: List[Dict] = []
+    for item in rows or []:
+        if not isinstance(item, dict):
+            continue
+        c = _extract_code_from_any_dict(item)
+        title = _strip_html_text(item.get("Title") or item.get("title") or item.get("Label") or item.get("label") or item.get("Text") or "")
+        if c:
+            out.append({
+                "code_formatted": c,
+                "code": code_norm_for_rules(c),
+                "short_desc": title,
+                "long_desc": title,
+                "source": "WHO ICD-10 browser tree",
+                "score": 0.0,
+                "is_leaf": bool(item.get("isLeaf", item.get("IsLeaf", False))),
+                "raw": item,
+            })
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def who_browser_get_concept_cached(code: str, release_id: str = "2019") -> Dict:
+    """Fetch an ICD-10 concept page from WHO browser and parse a title if possible."""
+    import requests
+    code = str(code or "").strip().upper()
+    if not code:
+        return {}
+    url = f"{WHO_BROWSER_BASE}/{release_id}/en/GetConcept"
+    r = requests.get(url, params={"ConceptId": code}, timeout=20)
+    r.raise_for_status()
+    html = r.text or ""
+    # Pull the first heading-like code/title from the returned HTML.
+    title = ""
+    m = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", html, flags=re.I | re.S)
+    if m:
+        title = _strip_html_text(m.group(1))
+    if not title:
+        m = re.search(r"\b" + re.escape(code) + r"\b\s*([^<\n]{3,160})", _strip_html_text(html), flags=re.I)
+        if m:
+            title = f"{code} {m.group(1).strip()}"
+    title = re.sub(r"^" + re.escape(code) + r"\s*", "", title, flags=re.I).strip()
+    return {"code_formatted": code, "title": title, "html_excerpt": _strip_html_text(html)[:1000]}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def who_browser_search_cached(query: str, release_id: str = "2019", top_k: int = 25) -> Dict:
+    """
+    Try WHO ICD-10 browser search endpoints.
+    The browser exposes a public quick/advanced search UI; endpoint names have changed over time,
+    so this function tries safe known/observed variants and returns structured candidates if available.
+    """
+    import requests
+    q = str(query or "").strip()
+    if not q:
+        return {"status": "empty_query", "candidates": [], "attempted_urls": []}
+
+    base = f"{WHO_BROWSER_BASE}/{release_id}/en"
+    endpoint_trials = [
+        ("/QuickSearch", {"q": q}),
+        ("/QuickSearch", {"searchText": q}),
+        ("/QuickSearch", {"term": q}),
+        ("/JsonSearch", {"searchText": q, "useHtml": "false"}),
+        ("/JsonGetSearchResults", {"searchText": q, "useHtml": "false"}),
+        ("/JsonGetQuickSearchConcepts", {"searchText": q, "useHtml": "false"}),
+        ("/JsonGetQuickSearchConcepts", {"term": q, "useHtml": "false"}),
+        ("/JsonGetAdvancedSearchResults", {"SearchText": q, "Title": "true", "Synonym": "true", "Inclusion": "true", "Description": "true", "Exclusion": "false", "useHtml": "false"}),
+        ("/Search", {"searchText": q}),
+    ]
+    attempted = []
+    last_error = ""
+    for path, params in endpoint_trials:
+        url = base + path
+        attempted.append(url)
+        try:
+            r = requests.get(url, params=params, timeout=18)
+            if r.status_code != 200:
+                last_error = f"{path}: HTTP {r.status_code}"
+                continue
+            ctype = (r.headers.get("content-type") or "").lower()
+            if "json" in ctype:
+                data = r.json()
+            else:
+                text = r.text or ""
+                # Some endpoints return JSON with a text/html content-type.
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    data = text
+            rows = []
+            if isinstance(data, dict):
+                for key in ["results", "Results", "items", "Items", "data", "Data", "concepts", "Concepts", "destinationEntities"]:
+                    if isinstance(data.get(key), list):
+                        rows = data.get(key)
+                        break
+                if not rows and any(k in data for k in ["ID", "id", "Code", "code", "Title", "title"]):
+                    rows = [data]
+            elif isinstance(data, list):
+                rows = data
+            elif isinstance(data, str):
+                # Parse code-title snippets from returned HTML/text.
+                plain = _strip_html_text(data)
+                for m in re.finditer(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?)\b\s*[-–—:]?\s*([^\n\r]{3,140})", plain):
+                    rows.append({"code": m.group(1), "title": m.group(2)})
+            candidates = []
+            for item in rows or []:
+                if not isinstance(item, dict):
+                    continue
+                code = _extract_code_from_any_dict(item)
+                title = _strip_html_text(
+                    item.get("title") or item.get("Title") or item.get("label") or item.get("Label") or
+                    item.get("Text") or item.get("text") or item.get("name") or item.get("Name") or ""
+                )
+                if not title:
+                    title = _who_title_from_json(item)
+                if code:
+                    candidates.append({
+                        "code_formatted": code,
+                        "code": code_norm_for_rules(code),
+                        "short_desc": title,
+                        "long_desc": title,
+                        "source": "WHO ICD-10 browser search",
+                        "score": float(item.get("score", item.get("Score", 0.0)) or 0.0),
+                        "raw": item,
+                    })
+            if candidates:
+                return {"status": "ok", "candidates": candidates[:top_k], "attempted_urls": attempted, "endpoint": path}
+        except Exception as e:
+            last_error = f"{path}: {type(e).__name__}: {e}"
+            continue
+    return {"status": "failed", "candidates": [], "attempted_urls": attempted, "error": last_error}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def who_foundation_search_cached(client_id: str, client_secret: str, query: str, release_id: str = "2019-04", top_k: int = 25) -> Dict:
+    """Official ICD API Foundation search. It is useful for official terms; ICD-10 code may be absent."""
+    import requests
+    token_data = who_icd_get_token_cached(client_id.strip(), client_secret.strip())
+    token = token_data.get("access_token", "")
+    if not token:
+        raise RuntimeError("WHO token response did not contain access_token")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Accept-Language": "en",
+        "API-Version": "v2",
+    }
+    params = {"q": query, "flatResults": "true", "useFlexisearch": "true", "releaseId": release_id}
+    url = f"{WHO_API_BASE}/entity/search"
+    r = requests.get(url, headers=headers, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("destinationEntities", []) if isinstance(data, dict) else []
+    candidates = []
+    for item in rows[:top_k] if isinstance(rows, list) else []:
+        title = _strip_html_text(item.get("title", ""))
+        code = _extract_code_from_any_dict(item)
+        # For ICD-11 foundation theCode is often null. Keep these for audit, but do not use
+        # them as final ICD-10 codes unless a code is actually present.
+        if code:
+            candidates.append({
+                "code_formatted": code,
+                "code": code_norm_for_rules(code),
+                "short_desc": title,
+                "long_desc": title,
+                "source": "WHO ICD API foundation search",
+                "score": float(item.get("score", 0.0) or 0.0),
+                "raw": item,
+            })
+    return {"status": "ok", "candidates": candidates, "raw_result_count": len(rows) if isinstance(rows, list) else 0, "raw": data}
+
+
+def _enrich_who_candidate_with_local_flags(c: Dict, df_source: pd.DataFrame, query: str = "") -> Dict:
+    x = dict(c or {})
+    code = str(x.get("code_formatted", x.get("code", "")) or "").strip().upper()
+    title = str(x.get("short_desc", x.get("long_desc", "")) or "").strip()
+    flags = _local_flags_for_selected_code(df_source, code)
+    x.update(flags)
+    # Keep WHO title as final display title; use Excel descriptions only as validation metadata.
+    x["code_formatted"] = code
+    x["code"] = code_norm_for_rules(code)
+    x["short_desc"] = title or flags.get("local_short_desc", "")
+    x["long_desc"] = title or flags.get("local_long_desc", "")
+    x["score"] = float(x.get("score", 0.0) or 0.0) + _candidate_rank_adjustment_for_query(code, title, query)
+    x["retrieval_source"] = x.get("source", "WHO retrieval")
+    x["source"] = x.get("source", "WHO retrieval")
+    return x
+
+
+def _add_tree_children_for_candidates(candidates: List[Dict], df_source: pd.DataFrame, query: str, release_id: str, max_children_per_parent: int = 12) -> List[Dict]:
+    out: List[Dict] = []
+    seen = set()
+
+    def add_candidate(c: Dict, parent_code: str = ""):
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip().upper()
+        if not code:
+            return
+        norm = code_norm_for_rules(code)
+        if norm in seen:
+            return
+        y = _enrich_who_candidate_with_local_flags(c, df_source, query)
+        if parent_code:
+            y["who_parent_code"] = parent_code
+        out.append(y)
+        seen.add(norm)
+
+    for c in candidates or []:
+        add_candidate(c)
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip().upper()
+        # Fetch children only for parent/category/subcategory codes to avoid too many calls.
+        if code and len(code_norm_for_rules(code)) <= 4:
+            try:
+                children = who_browser_get_children_cached(code, release_id=release_id)
+                for child in children[:max_children_per_parent]:
+                    child = dict(child)
+                    child["source"] = "WHO ICD-10 browser tree child"
+                    add_candidate(child, parent_code=code)
+            except Exception as e:
+                # Keep parent candidate even if tree fetch fails.
+                c.setdefault("tree_error", f"{type(e).__name__}: {e}")
+    return out
+
+
+def retrieve_icd10_candidates_who_first(
+    query: str,
+    df_source: pd.DataFrame,
+    sex_value: str = "",
+    role: str = "immediate",
+    top_k: int = 20,
+    release_id: str = "2019",
+) -> Tuple[List[Dict], Dict]:
+    """WHO-first ICD-10 retrieval, with explicit local fallback for safety."""
+    q = str(query or "").strip()
+    audit = {"mode": "WHO-first retrieval; Excel for validation flags", "query": q, "release_id": release_id, "steps": []}
+    candidates: List[Dict] = []
+
+    # If doctor typed an ICD-10 code directly, use WHO/browser lookup and tree.
+    if re.search(r"\b[A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?\b", q.upper()):
+        code = re.search(r"\b[A-TV-Z][0-9]{2}(?:\.[0-9A-Z]{1,4})?\b", q.upper()).group(0)
+        try:
+            concept = who_browser_get_concept_cached(code, release_id=release_id)
+            candidates.append({
+                "code_formatted": code,
+                "code": code_norm_for_rules(code),
+                "short_desc": concept.get("title", ""),
+                "long_desc": concept.get("title", ""),
+                "source": "WHO ICD-10 browser direct code lookup",
+                "score": 20.0,
+            })
+            audit["steps"].append({"source": "WHO browser direct code lookup", "status": "ok", "code": code})
+        except Exception as e:
+            audit["steps"].append({"source": "WHO browser direct code lookup", "status": "failed", "error": f"{type(e).__name__}: {e}"})
+
+    # WHO ICD-10 browser free-text search.
+    try:
+        b = who_browser_search_cached(q, release_id=release_id, top_k=top_k)
+        audit["steps"].append({"source": "WHO ICD-10 browser search", "status": b.get("status"), "endpoint": b.get("endpoint", ""), "count": len(b.get("candidates", []) or []), "error": b.get("error", "")})
+        candidates.extend(b.get("candidates", []) or [])
+    except Exception as e:
+        audit["steps"].append({"source": "WHO ICD-10 browser search", "status": "failed", "error": f"{type(e).__name__}: {e}"})
+
+    # Official ICD API foundation search. Useful only if it returns codes; often it returns official terms without ICD-10 codes.
+    client_id, client_secret = get_who_api_credentials()
+    if client_id and client_secret:
+        try:
+            f = who_foundation_search_cached(client_id.strip(), client_secret.strip(), q, release_id="2019-04", top_k=top_k)
+            audit["steps"].append({"source": "WHO ICD API foundation search", "status": f.get("status"), "count": len(f.get("candidates", []) or []), "raw_result_count": f.get("raw_result_count", 0)})
+            candidates.extend(f.get("candidates", []) or [])
+        except Exception as e:
+            audit["steps"].append({"source": "WHO ICD API foundation search", "status": "failed", "error": f"{type(e).__name__}: {e}"})
+    else:
+        audit["steps"].append({"source": "WHO ICD API foundation search", "status": "not_configured"})
+
+    # If WHO produced code candidates, fetch the tree children and enrich with local flags.
+    candidates = _add_tree_children_for_candidates(candidates, df_source, q, release_id=release_id)
+
+    # Safety fallback: use local Excel retrieval only if WHO did not return usable ICD-10 code candidates.
+    # The fallback is explicitly marked; Excel is still the validation source either way.
+    if not candidates:
+        try:
+            local = search_icd_candidates(df_source, st.session_state.get("faiss_index"), st.session_state.get("bm25_index"), q, sex_value, role, top_k=top_k)
+            fallback = []
+            for lc in local:
+                code = str(lc.get("code_formatted", lc.get("code", "")) or "").strip().upper()
+                if not code:
+                    continue
+                item = dict(lc)
+                item["source"] = "LOCAL FALLBACK: Excel retrieval because WHO free-text ICD-10 retrieval returned no code candidates"
+                item["retrieval_source"] = item["source"]
+                item["local_match_status"] = "found"
+                fallback.append(item)
+                # Also try WHO tree around the local code/category to give doctor the tree.
+                parent_or_subcat = dot_code_from_norm(code_norm_for_rules(code)[:4]) if len(code_norm_for_rules(code)) >= 4 else parent_code_for_who(code)
+                try:
+                    parent_title = ""
+                    concept = who_browser_get_concept_cached(parent_or_subcat, release_id=release_id)
+                    parent_title = concept.get("title", "")
+                    fallback.append({
+                        "code_formatted": parent_or_subcat,
+                        "code": code_norm_for_rules(parent_or_subcat),
+                        "short_desc": parent_title or str(lc.get("short_desc", "")),
+                        "long_desc": parent_title or str(lc.get("long_desc", "")),
+                        "source": "WHO ICD-10 browser tree from local fallback seed",
+                        "retrieval_source": "WHO ICD-10 browser tree from local fallback seed",
+                        "score": float(lc.get("score", 0.0) or 0.0) + 1.0,
+                    })
+                    try:
+                        children = who_browser_get_children_cached(parent_or_subcat, release_id=release_id)
+                        for ch in children:
+                            ch["source"] = "WHO ICD-10 browser tree child from local fallback seed"
+                            fallback.append(ch)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            candidates = [_enrich_who_candidate_with_local_flags(x, df_source, q) for x in fallback]
+            audit["steps"].append({"source": "Excel fallback", "status": "used", "count": len(local)})
+        except Exception as e:
+            audit["steps"].append({"source": "Excel fallback", "status": "failed", "error": f"{type(e).__name__}: {e}"})
+
+    # De-duplicate and rank.
+    seen = set()
+    unique: List[Dict] = []
+    for c in candidates or []:
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip().upper()
+        norm = code_norm_for_rules(code)
+        if not norm or norm in seen:
+            continue
+        c = _enrich_who_candidate_with_local_flags(c, df_source, q)
+        c["score"] = float(c.get("score", 0.0) or 0.0) + _candidate_rank_adjustment_for_query(code, c.get("short_desc", ""), q)
+        unique.append(c)
+        seen.add(norm)
+    unique.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    audit["final_candidate_count"] = len(unique)
+    audit["final_sources"] = sorted(set(str(x.get("source", "")) for x in unique if x.get("source")))
+    return unique[:top_k], audit
+
+
+def _selected_candidate_to_coded_item(candidate: Dict, cause: str, line: str, role: str, interval: str, label: str, df_source: pd.DataFrame) -> Dict:
+    code = str(candidate.get("code_formatted", candidate.get("code", "")) or "").strip().upper()
+    title = str(candidate.get("short_desc", candidate.get("long_desc", "")) or "").strip()
+    flags = _local_flags_for_selected_code(df_source, code)
+    # Selected display title remains WHO title if available; local fields are used for validation flags.
+    return {
+        "role": role,
+        "line": line,
+        "label": label,
+        "cause": cause,
+        "interval": interval,
+        "code_formatted": code,
+        "short_desc": title or flags.get("local_short_desc", ""),
+        "long_desc": title or flags.get("local_long_desc", ""),
+        "acceptable_main": flags.get("acceptable_main", "Unknown"),
+        "gender_restriction": flags.get("gender_restriction", ""),
+        "classification": flags.get("classification", ""),
+        "note": flags.get("note", ""),
+        "local_match_status": flags.get("local_match_status", "not_found"),
+        "local_code_formatted": flags.get("local_code_formatted", ""),
+        "local_short_desc": flags.get("local_short_desc", ""),
+        "local_long_desc": flags.get("local_long_desc", ""),
+        "selection_status": "who_retrieved_local_validated" if flags.get("local_match_status") == "found" else "who_retrieved_needs_local_review",
+        "selection_notes": "Code candidate retrieved from WHO ICD source; local Excel used for mortality validation flags.",
+        "retrieval_source": candidate.get("source", "WHO retrieval"),
+        "candidates": [],
+        "who_retrieval_candidate": candidate,
+    }
+
+
+def verify_code_with_who_api(selected_code: str, release_id: str = "2019") -> Dict:
+    """Enhanced WHO verification: exact -> subcategory -> parent."""
+    selected_code = str(selected_code or "").strip()
+    if not selected_code:
+        return {"status": "not_checked", "message": "No selected code to verify."}
+    client_id, client_secret = get_who_api_credentials()
+    if not client_id or not client_secret:
+        # Public WHO ICD-10 browser tree can still confirm that the code page exists.
+        try:
+            concept = who_browser_get_concept_cached(selected_code, release_id=release_id)
+            if concept:
+                return {"status": "browser_verified", "selected_code": selected_code, "verified_code": selected_code, "release_id": release_id, "message": f"WHO ICD-10 browser found {selected_code}.", "who_info": concept}
+        except Exception:
+            pass
+        return {"status": "not_configured", "message": "WHO ICD API credentials are not configured."}
+
+    norm = code_norm_for_rules(selected_code)
+    attempts = build_who_icd10_attempt_codes(selected_code)
+    last_error = ""
+    for attempt in attempts:
+        try:
+            info = who_icd10_lookup_cached(client_id.strip(), client_secret.strip(), attempt, release_id=release_id)
+            attempt_norm = code_norm_for_rules(attempt)
+            if attempt_norm == norm:
+                status = "exact_verified"
+                label = "exact code"
+            elif len(attempt_norm) == 4 and norm.startswith(attempt_norm):
+                status = "subcategory_verified"
+                label = "subcategory"
+            elif attempt_norm == parent_code_for_who(norm):
+                status = "parent_verified"
+                label = "parent category"
+            else:
+                status = "verified"
+                label = "code"
+            return {
+                "status": status,
+                "selected_code": selected_code,
+                "verified_code": attempt,
+                "attempted_codes": attempts,
+                "release_id": release_id,
+                "message": f"WHO ICD API verified {label} {attempt}.",
+                "who_info": info,
+            }
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+    # Browser fallback confirmation.
+    for attempt in attempts:
+        try:
+            concept = who_browser_get_concept_cached(attempt, release_id=release_id)
+            if concept:
+                return {
+                    "status": "browser_verified",
+                    "selected_code": selected_code,
+                    "verified_code": attempt,
+                    "attempted_codes": attempts,
+                    "release_id": release_id,
+                    "message": f"WHO ICD-10 browser found {attempt}; OAuth API lookup did not verify a more specific code.",
+                    "who_info": concept,
+                    "api_error": last_error,
+                }
+        except Exception:
+            continue
+    return {
+        "status": "failed",
+        "selected_code": selected_code,
+        "attempted_codes": attempts,
+        "release_id": release_id,
+        "message": "WHO ICD API/browser lookup failed; selected code needs coder review.",
+        "error": last_error,
+    }
+
+
+def code_extracted_causes_with_claude(
+    api_key: str,
+    extracted: dict,
+    df_source: pd.DataFrame,
+    faiss_index,
+    bm25,
+    patient_info: dict,
+) -> dict:
+    """WHO-first coding pipeline. Claude is not used to choose ICD codes; doctor confirms from WHO candidates."""
+    coded_causes: List[Dict] = []
+    retrieval_audit: List[Dict] = []
+
+    def code_one(item: Dict, i: int, role: str, line: str, label: str) -> Optional[Dict]:
+        cause = str(item.get("cause", "")).strip()
+        interval = str(item.get("interval", "—")).strip() or "—"
+        if not cause:
+            return None
+        cands, audit = retrieve_icd10_candidates_who_first(
+            query=cause,
+            df_source=df_source,
+            sex_value=patient_info.get("sex", ""),
+            role=role,
+            top_k=25,
+            release_id="2019",
+        )
+        retrieval_audit.append({"line": line, "cause": cause, "audit": audit})
+        if cands:
+            chosen = _selected_candidate_to_coded_item(cands[0], cause, line, role, interval, label, df_source)
+            chosen["candidates"] = cands
+            chosen["who_api"] = verify_code_with_who_api(chosen.get("code_formatted", ""), release_id="2019")
+            chosen["who_retrieval_audit"] = audit
+            return chosen
+        return {
+            "role": role,
+            "line": line,
+            "label": label,
+            "cause": cause,
+            "interval": interval,
+            "code_formatted": "",
+            "short_desc": "",
+            "long_desc": "",
+            "acceptable_main": "Unknown",
+            "gender_restriction": "",
+            "classification": "",
+            "note": "",
+            "local_match_status": "not_found",
+            "selection_status": "manual_review",
+            "selection_notes": "No ICD-10 code candidate was retrieved from WHO or local fallback.",
+            "candidates": [],
+            "who_api": verify_code_with_who_api("", release_id="2019"),
+            "who_retrieval_audit": audit,
+        }
+
+    part1_items = [x for x in extracted.get("part1_chain", []) if str(x.get("cause", "")).strip()]
+    for i, item in enumerate(part1_items):
+        role = "immediate" if i == 0 else ("underlying" if i == len(part1_items) - 1 else "contributing")
+        line = str(item.get("line", "")).strip() or chr(ord("a") + i)
+        label = "Immediate cause" if i == 0 else ("Underlying cause" if role == "underlying" else f"Due to ({line})")
+        coded = code_one(item, i, role, line, label)
+        if coded:
+            coded_causes.append(coded)
+
+    for i, item in enumerate(extracted.get("part2_conditions", []), start=1):
+        cause = str(item.get("cause", "")).strip()
+        if not cause:
+            continue
+        coded = code_one(item, i, "other", f"II-{i}", f"Other condition ({i})")
+        if coded:
+            coded_causes.append(coded)
+
+    validation = validate_certificate(coded_causes, patient_info.get("sex", ""))
+    starting_point = determine_starting_point_from_structured_part1(part1_items)
+    validation["starting_point_rule"] = starting_point.get("rule", "")
+    validation["retrieval_architecture"] = "WHO ICD retrieval/tree first; Excel/local file for mortality validation flags."
+    validation["who_retrieval_audit"] = retrieval_audit
+
+    return {
+        "concepts": extracted,
+        "coded_causes": coded_causes,
+        "validation": validation,
+    }
+
+
+def attach_who_verification_to_results(coded_results: Dict, release_id: str = "2019") -> Dict:
+    """Attach WHO verification without changing the selected WHO/local code."""
+    out = dict(coded_results or {})
+    coded = []
+    for item in out.get("coded_causes", []) or []:
+        x = dict(item)
+        x["who_api"] = verify_code_with_who_api(x.get("code_formatted", ""), release_id=release_id)
+        coded.append(x)
+    out["coded_causes"] = coded
+    out.setdefault("validation", {})
+    out["validation"]["who_api_release"] = release_id
+    out["validation"]["who_api_checked"] = True
+    return out
+
+
+def _candidate_code_label(code: str, desc: str, selected: bool = False, source: str = "") -> str:
+    prefix = "Current recommendation: " if selected else ""
+    src = f" [{source}]" if source else ""
+    return f"{prefix}{code} — {desc}{src}" if code else "Needs coder review / no suitable code"
+
+
+def _candidate_option_maps(item: Dict) -> Tuple[List[str], Dict[str, str]]:
+    """Build code options from WHO/API/browser candidate list; local Excel flags are not the dropdown source."""
+    options: List[str] = []
+    labels: Dict[str, str] = {}
+    current_code = str(item.get("code_formatted", "") or "").strip()
+    current_desc = str(item.get("short_desc", "") or item.get("long_desc", "") or "").strip()
+    current_source = str(item.get("retrieval_source", "WHO retrieval") or "WHO retrieval")
+    if current_code:
+        options.append(current_code)
+        labels[current_code] = _candidate_code_label(current_code, current_desc, selected=True, source=current_source)
+
+    for c in item.get("candidates", []) or []:
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip()
+        desc = str(c.get("short_desc", "") or c.get("long_desc", "") or "").strip()
+        src = str(c.get("source", c.get("retrieval_source", "WHO retrieval")) or "WHO retrieval")
+        if not code or code in options:
+            continue
+        options.append(code)
+        labels[code] = _candidate_code_label(code, desc, selected=False, source=src)
+        if len(options) >= 20:
+            break
+    options.append("__REVIEW__")
+    labels["__REVIEW__"] = "Needs coder review / no suitable code"
+    return options, labels
+
+
+def _candidate_by_code(item: Dict, code: str) -> Optional[Dict]:
+    norm = code_norm_for_rules(code)
+    if not norm:
+        return None
+    # Current selected code itself.
+    if code_norm_for_rules(item.get("code_formatted", "")) == norm:
+        return item
+    for c in item.get("candidates", []) or []:
+        if code_norm_for_rules(c.get("code_formatted", c.get("code", ""))) == norm:
+            return c
+    return None
+
+
+def apply_doctor_icd_choices_to_results(
+    coded_results: Dict,
+    df_source: pd.DataFrame,
+    release_id: str = "2019",
+) -> Tuple[Dict, List[str]]:
+    """Apply doctor/coder code choices from WHO candidates, then enrich with Excel validation flags."""
+    updated = dict(coded_results or {})
+    new_coded: List[Dict] = []
+    missing_reasons: List[str] = []
+    for idx, item in enumerate(updated.get("coded_causes", []) or []):
+        x = dict(item)
+        old_code = str(x.get("code_formatted", "") or "").strip()
+        chosen_code = st.session_state.get(f"doctor_icd_choice_{idx}", old_code or "__REVIEW__")
+        reason = str(st.session_state.get(f"doctor_icd_reason_{idx}", "") or "").strip()
+        if chosen_code == "__REVIEW__":
+            if not reason:
+                missing_reasons.append(f"Line {x.get('line', '')}: add a reason for coder review.")
+            x.update({
+                "code_formatted": "",
+                "short_desc": "",
+                "long_desc": "",
+                "acceptable_main": "Unknown",
+                "gender_restriction": "",
+                "classification": "",
+                "note": "",
+                "local_match_status": "not_found",
+                "selection_status": "manual_review",
+                "selection_notes": reason or "Doctor/coder marked this line for manual coding review.",
+                "doctor_selected_code": "",
+                "doctor_override_reason": reason,
+                "who_api": verify_code_with_who_api("", release_id=release_id),
+            })
+            new_coded.append(x)
+            continue
+        chosen_code = str(chosen_code or "").strip().upper()
+        changed = bool(chosen_code and chosen_code != old_code)
+        if changed and not reason:
+            missing_reasons.append(f"Line {x.get('line', '')}: add a reason for changing {old_code or 'empty code'} to {chosen_code}.")
+        cand = _candidate_by_code(x, chosen_code) or {"code_formatted": chosen_code, "short_desc": "", "long_desc": "", "source": "Doctor-entered code from dropdown"}
+        flags = _local_flags_for_selected_code(df_source, chosen_code)
+        x["code_formatted"] = chosen_code
+        x["short_desc"] = str(cand.get("short_desc", cand.get("long_desc", "")) or flags.get("local_short_desc", ""))
+        x["long_desc"] = str(cand.get("long_desc", cand.get("short_desc", "")) or flags.get("local_long_desc", ""))
+        x["acceptable_main"] = flags.get("acceptable_main", "Unknown")
+        x["gender_restriction"] = flags.get("gender_restriction", "")
+        x["classification"] = flags.get("classification", "")
+        x["note"] = flags.get("note", "")
+        x["local_match_status"] = flags.get("local_match_status", "not_found")
+        x["local_code_formatted"] = flags.get("local_code_formatted", "")
+        x["local_short_desc"] = flags.get("local_short_desc", "")
+        x["local_long_desc"] = flags.get("local_long_desc", "")
+        x["retrieval_source"] = str(cand.get("source", cand.get("retrieval_source", x.get("retrieval_source", "WHO retrieval"))))
+        x["selection_status"] = "doctor_selected" if changed else "doctor_confirmed"
+        x["selection_notes"] = reason if changed else "Doctor/coder confirmed the recommended ICD code."
+        x["doctor_selected_code"] = chosen_code
+        x["doctor_override_reason"] = reason
+        x["who_api"] = verify_code_with_who_api(chosen_code, release_id=release_id)
+        new_coded.append(x)
+    if missing_reasons:
+        return coded_results, missing_reasons
+    updated["coded_causes"] = new_coded
+    updated.setdefault("validation", {})
+    updated["validation"] = validate_certificate(new_coded, st.session_state.get("form_data", {}).get("sex", ""))
+    updated["validation"]["doctor_icd_choice_applied"] = True
+    updated["validation"]["who_api_release"] = release_id
+    updated["validation"]["who_api_checked"] = True
+    updated["validation"]["retrieval_architecture"] = "WHO ICD retrieval/tree first; Excel/local file for mortality validation flags."
+    return updated, []
+
+
+def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd.DataFrame, api_key: str, patient_info: Dict) -> None:
+    """Doctor/coder-facing constrained ICD code chooser after WHO retrieval/tree."""
+    if not coded_results or not coded_results.get("coded_causes"):
+        return
+    st.markdown("### Doctor ICD code selection")
+    st.caption(
+        "Selectable codes come from WHO ICD retrieval/tree when available. The Excel/local file is used after selection for mortality validation flags "
+        "such as ill-defined, unacceptable UCOD, gender restriction, and local notes. If WHO free-text retrieval fails, the app labels any local fallback explicitly."
+    )
+    for idx, item in enumerate(coded_results.get("coded_causes", []) or []):
+        options, labels = _candidate_option_maps(item)
+        current_code = str(item.get("code_formatted", "") or "").strip()
+        default_code = current_code if current_code in options else (options[0] if options else "__REVIEW__")
+        current_index = options.index(default_code) if default_code in options else 0
+        line = item.get("line", "")
+        cause = item.get("cause", "")
+        with st.container(border=True):
+            st.markdown(f"**Line {line} — {cause}**")
+            st.caption(f"Current retrieval source: {item.get('retrieval_source', 'WHO retrieval')}")
+            choice = st.selectbox(
+                "Choose final ICD code for this line",
+                options,
+                index=current_index,
+                format_func=lambda x, labels=labels: labels.get(x, str(x)),
+                key=f"doctor_icd_choice_{idx}",
+            )
+            if choice != current_code:
+                st.text_area(
+                    "Reason for changing the recommendation / requesting review",
+                    key=f"doctor_icd_reason_{idx}",
+                    placeholder="Example: The doctor did not specify upper lobe, so an unspecified bronchus/lung code is more appropriate.",
+                    height=70,
+                )
+            who = item.get("who_api", {}) or {}
+            st.caption(f"WHO verification: {who.get('status', 'not checked')} — {who.get('message', '')}")
+            st.caption(
+                f"Excel/local validation match: {item.get('local_match_status', 'unknown')}"
+                + (f"; local code: {item.get('local_code_formatted')}" if item.get('local_code_formatted') else "")
+            )
+            with st.expander("Show WHO retrieval/tree candidates and local validation flags"):
+                rows = []
+                for c in item.get("candidates", []) or []:
+                    rows.append({
+                        "code": c.get("code_formatted", c.get("code", "")),
+                        "title": c.get("short_desc", c.get("long_desc", "")),
+                        "source": c.get("source", c.get("retrieval_source", "")),
+                        "local_match": c.get("local_match_status", ""),
+                        "local_code": c.get("local_code_formatted", ""),
+                        "score": c.get("score", ""),
+                    })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No candidate list is available for this line.")
+    if st.button("Apply ICD choices and refresh WHO/Table A/B workflow", type="primary"):
+        updated, problems = apply_doctor_icd_choices_to_results(coded_results, df_source, release_id="2019")
+        if problems:
+            for p in problems:
+                st.warning(p)
+            return
+        st.session_state.icd_results = updated
+        st.session_state.agent2_result = agent2_candidate_validation_with_llm(api_key, updated, patient_info)
+        st.session_state.agent2_done = True
+        st.session_state.agent3_done = False
+        st.session_state.agent3_result = None
+        st.success("Doctor ICD choices were applied. Please run the Table A/B Rule Trace again.")
+        st.rerun()
+
+
+def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> None:
+    """ICD Coding card for WHO retrieval/tree plus Excel validation flags."""
+    if not result:
+        st.markdown(
+            '<div class="agent-output-box">'
+            '<div class="agent-kicker">ICD CODING</div>'
+            '<div class="agent-title">ICD Coding</div>'
+            '<div class="agent-hidden-details-note">Run ICD Coding to retrieve WHO ICD candidates and validate them against local mortality flags.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    status = str(result.get("status", "warning")).lower()
+    status_label = {"pass": "PASSED", "warning": "REVIEW SUGGESTED", "block": "BLOCKED"}.get(status, status.upper())
+    status_class = "block" if status == "block" else ("warn" if status == "warning" else "")
+    box_class = "agent-output-box" + (" warn" if status == "warning" else (" block" if status == "block" else ""))
+    summary = str(result.get("summary", "ICD retrieval and validation completed.") or "ICD retrieval and validation completed.")
+    coded_causes = []
+    if coded_results:
+        coded_causes = coded_results.get("coded_causes", []) or []
+    if not coded_causes:
+        coded_causes = result.get("coded_causes_compact", []) or []
+    items_html = []
+    for item in coded_causes:
+        line = escape(item.get("line", ""))
+        role = escape(item.get("role", ""))
+        cause = escape(item.get("cause", ""))
+        selected_code = escape(item.get("code_formatted", item.get("selected_code", "")))
+        selected_desc = escape(item.get("short_desc", ""))
+        status_txt = escape(item.get("selection_status", ""))
+        retrieval_source = escape(item.get("retrieval_source", "WHO retrieval"))
+        local_match = escape(item.get("local_match_status", "unknown"))
+        local_code = escape(item.get("local_code_formatted", ""))
+        who = item.get("who_api", {}) or {}
+        who_status_raw = str(who.get("status", "not_checked"))
+        who_msg = str(who.get("message", "")) or who_status_raw
+        who_html = f'<br><span class="agent-hidden-details-note"><b>WHO verification:</b> {escape(who_status_raw)} — {escape(who_msg)}</span>'
+        cand_source = item.get("candidates", []) or item.get("top_candidates", []) or []
+        selected_norm = code_norm_for_rules(item.get("code_formatted", item.get("selected_code", "")))
+        display_candidates = []
+        if selected_norm:
+            for c in cand_source:
+                if code_norm_for_rules(c.get("code_formatted", c.get("code", ""))) == selected_norm:
+                    display_candidates.append(c)
+                    break
+        for c in cand_source:
+            if code_norm_for_rules(c.get("code_formatted", c.get("code", ""))) == selected_norm:
+                continue
+            display_candidates.append(c)
+            if len(display_candidates) >= 6:
+                break
+        top_rows = []
+        for c in display_candidates[:6]:
+            c_code = escape(c.get("code_formatted", c.get("code", "")))
+            c_desc = escape(c.get("short_desc", c.get("long_desc", "")))
+            src = escape(c.get("source", c.get("retrieval_source", "")))
+            marker = " <span class='agent-hidden-details-note'>(selected)</span>" if code_norm_for_rules(c.get("code_formatted", c.get("code", ""))) == selected_norm else ""
+            top_rows.append(f"<li><b>{c_code}</b> — {c_desc}<br><span class='agent-hidden-details-note'>Source: {src}</span>{marker}</li>")
+        top_html = "".join(top_rows) if top_rows else "<li>No retrieved candidates shown.</li>"
+        items_html.append(
+            f'<div class="agent2-code-item">'
+            f'<div class="agent2-code-line">Line {line} · {role}</div>'
+            f'<div class="agent2-code-cause">{cause}</div>'
+            f'<div class="agent2-selected-code">'
+            f'<b>Selected ICD code:</b> {selected_code} — {selected_desc}<br>'
+            f'<span class="agent-hidden-details-note"><b>Retrieval source:</b> {retrieval_source}; Status: {status_txt}</span><br>'
+            f'<span class="agent-hidden-details-note"><b>Excel/local validation:</b> {local_match}{("; local match " + local_code) if local_code else ""}</span>'
+            f'{who_html}'
+            f'</div>'
+            f'<div class="agent2-top3"><b>WHO retrieval/tree candidates shown to doctor:</b><ol>{top_html}</ol></div>'
+            f'</div>'
+        )
+    if not items_html:
+        items_html.append('<div class="agent-hidden-details-note">No ICD-coded causes are available yet.</div>')
+    issues = result.get("issues", []) or result.get("rule_issues", []) or []
+    errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "error"]
+    warnings = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).lower() == "warning"]
+    if errors:
+        note = f"{len(errors)} blocking ICD issue(s) found."
+    elif warnings:
+        note = f"{len(warnings)} ICD review warning(s) found."
+    else:
+        note = "All entered causes have selected ICD codes and local validation metadata when available."
+    html_out = (
+        f'<div class="{box_class}">'
+        f'<div class="agent-kicker">ICD CODING</div>'
+        f'<div class="agent-title">ICD Coding</div>'
+        f'<div class="agent-output-status {status_class}">Output: {escape(status_label)}</div>'
+        f'<div>{escape(summary)}</div>'
+        f'<div class="agent-hidden-details-note">{escape(note)}</div>'
+        f'<div class="agent2-code-list">{''.join(items_html)}</div>'
+        f'</div>'
+    )
+    st.markdown(html_out, unsafe_allow_html=True)
+
 # =============================================================================
 # PAGE 1
 # =============================================================================
@@ -6049,7 +7040,7 @@ elif st.session_state.page == 4:
             render_agent_card_header(
                 2,
                 "ICD Coding",
-                "Runs Excel-grounded retrieval and LLM code selection. The LLM can choose only from retrieved ICD file candidates.",
+                "Runs WHO ICD retrieval/tree first, then uses Excel/local metadata only for mortality validation flags.",
                 state="active",
             )
             st.markdown(
@@ -6090,7 +7081,7 @@ elif st.session_state.page == 4:
                         "part1_chain": part1_chain,
                         "part2_conditions": part2_conditions,
                     }
-                    with st.spinner("ICD Coding is retrieving candidates, selecting file-only codes, and verifying with WHO API when possible..."):
+                    with st.spinner("ICD Coding is retrieving WHO ICD candidates/tree and matching Excel validation flags..."):
                         coded_results = code_extracted_causes_with_claude(
                             api_key=API_KEY,
                             extracted=extracted,
