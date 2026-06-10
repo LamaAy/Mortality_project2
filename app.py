@@ -6299,9 +6299,14 @@ def attach_who_verification_to_results(coded_results: Dict, release_id: str = "2
 
 
 def _candidate_code_label(code: str, desc: str, selected: bool = False, source: str = "") -> str:
-    prefix = "Current recommendation: " if selected else ""
-    src = f" [{source}]" if source else ""
-    return f"{prefix}{code} — {desc}{src}" if code else "Needs coder review / no suitable code"
+    """Short doctor-facing selectbox label. Source/details are shown outside the dropdown."""
+    if not code:
+        return "Needs coder review / no suitable code"
+    desc = str(desc or "").strip().replace("\n", " ")
+    if len(desc) > 76:
+        desc = desc[:73].rstrip() + "..."
+    prefix = "Recommended: " if selected else ""
+    return f"{prefix}{code} — {desc}" if desc else f"{prefix}{code}"
 
 
 def _candidate_option_maps(item: Dict) -> Tuple[List[str], Dict[str, str]]:
@@ -6414,60 +6419,282 @@ def apply_doctor_icd_choices_to_results(
 
 
 def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd.DataFrame, api_key: str, patient_info: Dict) -> None:
-    """Doctor/coder-facing constrained ICD code chooser after WHO retrieval/tree."""
+    """Doctor/coder-facing constrained ICD code chooser after WHO retrieval/tree.
+
+    v8 UI principle:
+    - Show the recommendation first.
+    - Separate candidate source, WHO verification, and local mortality validation.
+    - Keep retrieval/audit details hidden in an expander.
+    """
     if not coded_results or not coded_results.get("coded_causes"):
         return
+
+    st.markdown("""
+    <style>
+    .doctor-choice-card {
+        border: 1px solid #d8e6dc;
+        border-radius: 18px;
+        padding: 20px 22px;
+        background: #ffffff;
+        box-shadow: 0 10px 26px rgba(0,0,0,0.045);
+        margin: 16px 0 24px 0;
+    }
+    .doctor-choice-title {
+        font-size: 1.08rem;
+        font-weight: 800;
+        color: #152033;
+        margin-bottom: 12px;
+    }
+    .doctor-mini-label {
+        color: #6b7280;
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 5px;
+    }
+    .doctor-big-code {
+        font-size: 1.03rem;
+        font-weight: 800;
+        color: #006940;
+        line-height: 1.45;
+        margin-bottom: 8px;
+    }
+    .doctor-muted {
+        color: #6b7280;
+        font-size: 0.92rem;
+        line-height: 1.45;
+    }
+    .source-chip-row { margin-top: 4px; margin-bottom: 6px; }
+    .source-chip {
+        display: inline-block;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 800;
+        margin: 0 6px 6px 0;
+        border: 1px solid #cfe3d5;
+        background: #eef8f2;
+        color: #006940;
+    }
+    .source-chip.warn {
+        border-color: #f4d796;
+        background: #fff8e6;
+        color: #9a6700;
+    }
+    .source-chip.bad {
+        border-color: #efb7b7;
+        background: #fff1f1;
+        color: #b42318;
+    }
+    .selected-detail-box {
+        border-left: 4px solid #006940;
+        background: #f7fbf8;
+        padding: 12px 14px;
+        border-radius: 10px;
+        margin-top: 8px;
+        margin-bottom: 12px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.markdown("### Doctor ICD code selection")
     st.caption(
-        "Selectable codes come from WHO ICD retrieval/tree when available. The Excel/local file is used after selection for mortality validation flags "
-        "such as ill-defined, unacceptable UCOD, gender restriction, and local notes. If WHO free-text retrieval fails, the app labels any local fallback explicitly."
+        "Choose the final ICD code for each cause. WHO candidates are shown when available. "
+        "The local ICD Excel file is used for mortality validation flags and fallback candidates."
     )
+
+    def _shorten(text: str, n: int = 92) -> str:
+        text = str(text or "").strip().replace("\n", " ")
+        return text if len(text) <= n else text[: n - 3].rstrip() + "..."
+
+    def _display_title(obj: Dict) -> str:
+        return str(
+            obj.get("short_desc")
+            or obj.get("long_desc")
+            or obj.get("title")
+            or obj.get("local_short_desc")
+            or obj.get("local_long_desc")
+            or ""
+        ).strip()
+
+    def _candidate_source_label(item: Dict) -> Tuple[str, str]:
+        src = str(item.get("retrieval_source", "") or "").strip()
+        lower = src.lower()
+        if "local fallback" in lower and "who" in lower:
+            return "WHO tree + local fallback", "warn"
+        if "local fallback" in lower or "excel" in lower:
+            return "Local ICD fallback", "warn"
+        if "who" in lower:
+            return "WHO ICD candidate", "ok"
+        return src or "ICD candidate", "ok"
+
+    def _who_status_label(who: Dict) -> Tuple[str, str, str]:
+        status = str(who.get("status", "not_checked") or "not_checked")
+        msg = str(who.get("message", "") or "")
+        if status in {"exact_verified", "verified"}:
+            return "WHO exact verified", msg or "WHO verified the selected ICD code.", "ok"
+        if status == "subcategory_verified":
+            return "WHO subcategory verified", msg or "WHO verified the nearest ICD subcategory.", "ok"
+        if status == "parent_verified":
+            return "WHO parent verified", msg or "WHO verified the broader parent category only.", "warn"
+        if status == "not_configured":
+            return "WHO not configured", msg or "WHO credentials are not configured.", "warn"
+        if status in {"failed", "not_checked"}:
+            return "WHO not verified", msg or "WHO verification is unavailable for this code.", "warn"
+        return f"WHO {status}", msg, "warn"
+
+    def _mortality_validation_label(item: Dict, sex_value: str) -> Tuple[str, str, str]:
+        tmp = dict(item)
+        # Local match is a provenance signal; SP7/SP8/gender are the actual doctor-facing validation signals.
+        ill = False
+        unlikely = False
+        acc = None
+        gender_ok = True
+        try:
+            ill = bool(sp7_is_hard_ill_defined(tmp) or is_excel_ill_defined(tmp))
+            unlikely = bool(is_excel_unlikely_to_cause_death(tmp))
+            acc = acceptable_main_bool(tmp.get("acceptable_main", ""))
+            gender_ok = is_gender_allowed(tmp.get("gender_restriction", ""), sex_value)
+        except Exception:
+            pass
+        if ill:
+            return "Blocked: ill-defined", "SP7: this looks like a vague/terminal mechanism; doctor should revise the cause.", "bad"
+        if acc is False or unlikely:
+            return "Needs review", "SP8/local validation: this code may be unacceptable or unlikely as UCOD.", "warn"
+        if not gender_ok:
+            return "Blocked: demographic conflict", "The selected code conflicts with the recorded sex/gender restriction.", "bad"
+        if str(item.get("local_match_status", "")).lower() == "not_found":
+            return "Local flags not found", "No local Excel validation row was found; coder review is recommended.", "warn"
+        return "Mortality validation passed", "Not ill-defined; not marked unacceptable; no demographic conflict detected.", "ok"
+
+    sex_value = str((patient_info or {}).get("sex") or st.session_state.get("form_data", {}).get("sex", ""))
+
     for idx, item in enumerate(coded_results.get("coded_causes", []) or []):
         options, labels = _candidate_option_maps(item)
         current_code = str(item.get("code_formatted", "") or "").strip()
+        current_title = _display_title(item)
         default_code = current_code if current_code in options else (options[0] if options else "__REVIEW__")
         current_index = options.index(default_code) if default_code in options else 0
-        line = item.get("line", "")
-        cause = item.get("cause", "")
-        with st.container(border=True):
-            st.markdown(f"**Line {line} — {cause}**")
-            st.caption(f"Current retrieval source: {item.get('retrieval_source', 'WHO retrieval')}")
-            choice = st.selectbox(
-                "Choose final ICD code for this line",
-                options,
-                index=current_index,
-                format_func=lambda x, labels=labels: labels.get(x, str(x)),
-                key=f"doctor_icd_choice_{idx}",
+        line = html.escape(str(item.get("line", "") or ""))
+        cause = html.escape(str(item.get("cause", "") or ""))
+        recommended_code_html = html.escape(current_code or "No code selected")
+        recommended_title_html = html.escape(current_title or "No title available")
+
+        source_label, source_class = _candidate_source_label(item)
+        who_label, who_msg, who_class = _who_status_label(item.get("who_api", {}) or {})
+        mort_label, mort_msg, mort_class = _mortality_validation_label(item, sex_value)
+
+        st.markdown(f"""
+        <div class="doctor-choice-card">
+          <div class="doctor-choice-title">Line {line} — {cause}</div>
+          <div class="doctor-mini-label">Recommended final ICD</div>
+          <div class="doctor-big-code">{recommended_code_html} — {recommended_title_html}</div>
+          <div class="source-chip-row">
+            <span class="source-chip {'' if source_class == 'ok' else source_class}">{html.escape(source_label)}</span>
+            <span class="source-chip {'' if who_class == 'ok' else who_class}">{html.escape(who_label)}</span>
+            <span class="source-chip {'' if mort_class == 'ok' else mort_class}">{html.escape(mort_label)}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Candidate source**")
+            if source_class == "warn":
+                st.warning(source_label)
+            else:
+                st.success(source_label)
+            raw_src = str(item.get("retrieval_source", "") or "")
+            if raw_src and raw_src != source_label:
+                st.caption(raw_src)
+        with c2:
+            st.markdown("**WHO verification**")
+            if who_class == "ok":
+                st.success(who_msg)
+            else:
+                st.warning(who_msg)
+        with c3:
+            st.markdown("**Local mortality validation**")
+            if mort_class == "bad":
+                st.error(mort_msg)
+            elif mort_class == "warn":
+                st.warning(mort_msg)
+            else:
+                st.success(mort_msg)
+
+        st.markdown("**Doctor decision**")
+        choice = st.selectbox(
+            "Choose final ICD code for this line",
+            options,
+            index=current_index,
+            format_func=lambda x, labels=labels: labels.get(x, str(x)),
+            key=f"doctor_icd_choice_{idx}",
+        )
+
+        selected_obj = _candidate_by_code(item, choice) if choice != "__REVIEW__" else None
+        if choice == "__REVIEW__":
+            st.warning("This line will be sent to manual coder review and no final ICD code will be assigned automatically.")
+            selected_title = "Needs coder review / no suitable code"
+            selected_source = "Manual coder review"
+        else:
+            selected_title = _display_title(selected_obj or {}) or _display_title(item)
+            selected_source = str((selected_obj or {}).get("source") or (selected_obj or {}).get("retrieval_source") or item.get("retrieval_source", "ICD candidate"))
+            st.markdown(
+                f"""
+                <div class="selected-detail-box">
+                  <b>Selected code:</b> <code>{html.escape(choice)}</code><br>
+                  <b>Full title:</b> {html.escape(selected_title or 'No title available')}<br>
+                  <span class="doctor-muted"><b>Source:</b> {html.escape(selected_source or 'ICD candidate')}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            if choice != current_code:
-                st.text_area(
-                    "Reason for changing the recommendation / requesting review",
-                    key=f"doctor_icd_reason_{idx}",
-                    placeholder="Example: The doctor did not specify upper lobe, so an unspecified bronchus/lung code is more appropriate.",
-                    height=70,
-                )
-            who = item.get("who_api", {}) or {}
-            st.caption(f"WHO verification: {who.get('status', 'not checked')} — {who.get('message', '')}")
-            st.caption(
-                f"Excel/local validation match: {item.get('local_match_status', 'unknown')}"
-                + (f"; local code: {item.get('local_code_formatted')}" if item.get('local_code_formatted') else "")
+
+        # Reason is required for any change or manual review.
+        if choice != current_code:
+            st.text_area(
+                "Reason for changing the recommendation / requesting review",
+                key=f"doctor_icd_reason_{idx}",
+                placeholder="Example: The doctor did not specify upper lobe, so an unspecified bronchus/lung code is more appropriate.",
+                height=76,
             )
-            with st.expander("Show WHO retrieval/tree candidates and local validation flags"):
-                rows = []
-                for c in item.get("candidates", []) or []:
-                    rows.append({
-                        "code": c.get("code_formatted", c.get("code", "")),
-                        "title": c.get("short_desc", c.get("long_desc", "")),
-                        "source": c.get("source", c.get("retrieval_source", "")),
-                        "local_match": c.get("local_match_status", ""),
-                        "local_code": c.get("local_code_formatted", ""),
-                        "score": c.get("score", ""),
-                    })
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No candidate list is available for this line.")
-    if st.button("Apply ICD choices and refresh WHO/Table A/B workflow", type="primary"):
+
+        with st.expander("Show retrieval and audit details"):
+            st.markdown("**Candidate list**")
+            rows = []
+            for rank, c in enumerate(item.get("candidates", []) or [], start=1):
+                rows.append({
+                    "rank": rank,
+                    "code": c.get("code_formatted", c.get("code", "")),
+                    "title": c.get("short_desc", c.get("long_desc", "")),
+                    "candidate_source": c.get("source", c.get("retrieval_source", "")),
+                    "local_match": c.get("local_match_status", ""),
+                    "local_code": c.get("local_code_formatted", ""),
+                    "score": c.get("score", ""),
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No candidate list is available for this line.")
+
+            st.markdown("**Audit summary**")
+            st.json({
+                "entered_cause": item.get("cause", ""),
+                "recommended_code": current_code,
+                "recommended_title": current_title,
+                "retrieval_source": item.get("retrieval_source", ""),
+                "who_api": item.get("who_api", {}),
+                "local_match_status": item.get("local_match_status", "unknown"),
+                "local_code_formatted": item.get("local_code_formatted", ""),
+                "acceptable_main": item.get("acceptable_main", ""),
+                "gender_restriction": item.get("gender_restriction", ""),
+                "classification": item.get("classification", ""),
+                "note": item.get("note", ""),
+            })
+
+    st.markdown("---")
+    if st.button("Apply ICD choices and refresh WHO/Table A/B workflow", type="primary", use_container_width=True):
         updated, problems = apply_doctor_icd_choices_to_results(coded_results, df_source, release_id="2019")
         if problems:
             for p in problems:
