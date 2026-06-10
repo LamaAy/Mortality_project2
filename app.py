@@ -6620,12 +6620,9 @@ def render_agent2_result(result: Dict, coded_results: Optional[Dict] = None) -> 
             f'<div class="agent2-code-line">Line {line} · {role}</div>'
             f'<div class="agent2-code-cause">{cause}</div>'
             f'<div class="agent2-selected-code">'
-            f'<b>Selected ICD code:</b> {selected_code} — {selected_desc}<br>'
-            f'<span class="agent-hidden-details-note"><b>Retrieval source:</b> {retrieval_source}; Status: {status_txt}</span><br>'
-            f'<span class="agent-hidden-details-note"><b>Excel/local validation:</b> {local_match}{("; local match " + local_code) if local_code else ""}</span>'
-            f'{who_html}'
+            f'<b>Selected ICD code:</b> {selected_code} — {selected_desc}'
             f'</div>'
-            f'<div class="agent2-top3"><b>WHO retrieval/tree candidates shown to doctor:</b><ol>{top_html}</ol></div>'
+            f'<div class="agent2-top3"><b>ICD candidates shown to doctor:</b><ol>{top_html}</ol></div>'
             f'</div>'
         )
     if not items_html:
@@ -7183,58 +7180,67 @@ elif st.session_state.page == 4:
     # Stage 2: ICD Coding and doctor ICD choice
     # -------------------------------------------------------------------------
     elif stage == "icd":
-        st.markdown('<div class="section-title">ICD Coding</div>', unsafe_allow_html=True)
-        part1_chain, part2_conditions = _get_current_cod_from_state()
+        # Direct two-column layout: certificate fields remain on the left,
+        # ICD coding results and doctor choice are shown on the right.
+        left_col, right_col = st.columns([1.62, 1.0], gap="large")
 
-        c_back, c_run, c_next = st.columns([1, 1.35, 1])
-        with c_back:
-            if st.button("← Structure", use_container_width=True):
-                st.session_state.review_stage = "structure"
-                st.rerun()
-        with c_run:
-            can_run_icd = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
-            if st.button("Run ICD Coding", type="primary", disabled=not can_run_icd, use_container_width=True):
-                save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
-                extracted = {
-                    "part1_chain": part1_chain,
-                    "part2_conditions": part2_conditions,
-                }
-                with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
-                    coded_results = code_extracted_causes_with_claude(
-                        api_key=API_KEY,
-                        extracted=extracted,
-                        df_source=df_source,
-                        faiss_index=faiss_index,
-                        bm25=bm25,
-                        patient_info=patient_info,
-                    )
-                    coded_results = attach_who_verification_to_results(coded_results, release_id="2019")
-                    st.session_state.icd_results = coded_results
-                    st.session_state.agent2_result = agent2_candidate_validation_with_llm(
-                        API_KEY,
-                        coded_results,
-                        patient_info,
-                    )
-                st.session_state.agent2_done = True
-                st.session_state.agent3_done = False
-                st.session_state.agent3_result = None
-                st.rerun()
+        with left_col:
+            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
 
-        if st.session_state.get("agent2_result"):
-            render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
-        if st.session_state.get("icd_results"):
-            render_doctor_icd_choice_editor(
-                st.session_state.get("icd_results"),
-                df_source,
-                API_KEY,
-                patient_info,
-            )
+        with right_col:
+            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:1.15rem;font-weight:900;color:#006940;margin-bottom:.65rem;'>ICD Coding</div>", unsafe_allow_html=True)
 
-        with c_next:
-            can_continue_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
-            if st.button("Next → Table A/B", type="primary", disabled=not can_continue_rules, use_container_width=True):
-                st.session_state.review_stage = "rules"
-                st.rerun()
+            btn_back, btn_run, btn_next = st.columns([0.86, 1.12, 1.12], gap="small")
+            with btn_back:
+                if st.button("← Structure", use_container_width=True, key="icd_back_to_structure_right"):
+                    st.session_state.review_stage = "structure"
+                    st.rerun()
+            with btn_run:
+                can_run_icd = bool(st.session_state.get("agent1_done")) and not bool((st.session_state.get("agent1_result") or {}).get("blocking"))
+                if st.button("Run ICD Coding", type="primary", disabled=not can_run_icd, use_container_width=True, key="run_icd_right_panel"):
+                    save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+                    extracted = {
+                        "part1_chain": part1_chain,
+                        "part2_conditions": part2_conditions,
+                    }
+                    with st.spinner("Retrieving ICD candidates and checking local mortality flags..."):
+                        coded_results = code_extracted_causes_with_claude(
+                            api_key=API_KEY,
+                            extracted=extracted,
+                            df_source=df_source,
+                            faiss_index=faiss_index,
+                            bm25=bm25,
+                            patient_info=patient_info,
+                        )
+                        coded_results = attach_who_verification_to_results(coded_results, release_id="2019")
+                        st.session_state.icd_results = coded_results
+                        st.session_state.agent2_result = agent2_candidate_validation_with_llm(
+                            API_KEY,
+                            coded_results,
+                            patient_info,
+                        )
+                    st.session_state.agent2_done = True
+                    st.session_state.agent3_done = False
+                    st.session_state.agent3_result = None
+                    st.rerun()
+            with btn_next:
+                can_continue_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
+                if st.button("Next → Table A/B", type="primary", disabled=not can_continue_rules, use_container_width=True, key="next_table_ab_right_panel"):
+                    st.session_state.review_stage = "rules"
+                    st.rerun()
+
+            if st.session_state.get("agent2_result"):
+                st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+                render_agent2_result(st.session_state.get("agent2_result"), st.session_state.get("icd_results"))
+            if st.session_state.get("icd_results"):
+                render_doctor_icd_choice_editor(
+                    st.session_state.get("icd_results"),
+                    df_source,
+                    API_KEY,
+                    patient_info,
+                )
 
     # -------------------------------------------------------------------------
     # Stage 3: Table A/B Rule Trace
