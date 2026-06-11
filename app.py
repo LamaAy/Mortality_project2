@@ -7328,17 +7328,22 @@ elif st.session_state.page == 4:
                 mark = "⚠"
                 row_color = "#a66a00"
 
-            question = (
-                f"Does line ({lower_line}) {lower_cause} explain "
-                f"line ({upper_line}) {upper_cause}?"
-            )
+            compact_question = f"Does line ({lower_line}) explain line ({upper_line})?"
+            cause_line = f"{lower_cause} → {upper_cause}"
+            code_line = f"Address: {upper_code}; Search: {lower_code}"
 
+            # Compact row design: the table should fit inside the page/right panel.
+            short_result = result_text.replace(" in Table A", "")
             rows.append(f'''
               <tr>
-                <td style="padding:.65rem .55rem;border-bottom:1px solid #e5eee9;font-weight:900;color:#10233f;">{i}</td>
-                <td style="padding:.65rem .55rem;border-bottom:1px solid #e5eee9;line-height:1.45;">{escape(question)}<br><span style="color:#66766b;font-size:.86rem;">Address/effect: {escape(upper_code)} | Search cause: {escape(lower_code)}</span></td>
-                <td style="padding:.65rem .55rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};white-space:nowrap;">{escape(answer)}</td>
-                <td style="padding:.65rem .55rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};white-space:nowrap;">{mark} {escape(result_text)}</td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:#10233f;text-align:center;vertical-align:top;">{i}</td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;line-height:1.35;vertical-align:top;word-break:break-word;overflow-wrap:anywhere;">
+                  <b>{escape(compact_question)}</b><br>
+                  <span style="color:#293a31;font-size:.82rem;">{escape(cause_line)}</span><br>
+                  <span style="color:#66766b;font-size:.76rem;">{escape(code_line)}</span>
+                </td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};vertical-align:top;word-break:break-word;">{escape(answer)}</td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};vertical-align:top;word-break:break-word;">{mark} {escape(short_result)}</td>
               </tr>
             ''')
 
@@ -7346,8 +7351,8 @@ elif st.session_state.page == 4:
 
         st.markdown(
             f'''
-            <div style="border:1px solid {border};border-radius:18px;padding:1.15rem 1.25rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
-              <div style="font-size:1.25rem;font-weight:900;color:#10233f;margin-bottom:.35rem;">
+            <div style="border:1px solid {border};border-radius:18px;padding:1rem 1rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);max-width:100%;overflow:hidden;">
+              <div style="font-size:1.15rem;font-weight:900;color:#10233f;margin-bottom:.35rem;">
                 <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Table A — SP3 bottom-cause test
               </div>
               <div style="border-left:4px solid {accent};background:#fff;border-radius:12px;padding:.75rem .85rem;line-height:1.55;margin:.75rem 0 1rem;">
@@ -7355,19 +7360,27 @@ elif st.session_state.page == 4:
                 <div><b>SP3 question:</b> Does the bottom line explain every line above it?</div>
               </div>
 
-              <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5eee9;border-radius:12px;overflow:hidden;font-size:.9rem;">
+              <div style="width:100%;overflow:hidden;">
+              <table style="width:100%;max-width:100%;table-layout:fixed;border-collapse:collapse;background:#fff;border:1px solid #e5eee9;border-radius:12px;overflow:hidden;font-size:.80rem;">
+                <colgroup>
+                  <col style="width:12%;">
+                  <col style="width:48%;">
+                  <col style="width:18%;">
+                  <col style="width:22%;">
+                </colgroup>
                 <thead>
                   <tr style="background:#f7faf8;color:#10233f;text-align:left;">
-                    <th style="padding:.6rem .55rem;border-bottom:1px solid #e5eee9;">Check</th>
-                    <th style="padding:.6rem .55rem;border-bottom:1px solid #e5eee9;">Table A question</th>
-                    <th style="padding:.6rem .55rem;border-bottom:1px solid #e5eee9;">Short answer</th>
-                    <th style="padding:.6rem .55rem;border-bottom:1px solid #e5eee9;">Result</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;text-align:center;">Check</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Table A question</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Answer</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Result</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows_html}
                 </tbody>
               </table>
+              </div>
 
               <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;line-height:1.55;">
                 <div style="font-size:1.05rem;font-weight:900;color:{accent};">{escape(decision)}</div>
@@ -7574,7 +7587,8 @@ elif st.session_state.page == 4:
     # Stage 3: SP3 Table A test
     # -------------------------------------------------------------------------
     elif stage == "rules":
-        left_col, right_col = st.columns([1.62, 1.0], gap="large")
+        # Wider right panel so the SP3 Table A evidence table stays inside the page.
+        left_col, right_col = st.columns([1.10, 1.30], gap="large")
 
         with left_col:
             part1_chain, part2_conditions = render_doctor_edit_panel(fd)
