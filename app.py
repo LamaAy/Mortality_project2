@@ -7247,14 +7247,14 @@ elif st.session_state.page == 4:
         return len(part1) == 1
 
     def _render_rules_result_simple(result: Dict) -> None:
-        """Doctor-facing Table A/B result with explicit table output boxes and clear reason for selected line."""
+        '''Doctor-facing Table A/B result: compact, non-repetitive, and evidence-based.'''
         if not result:
             st.markdown(
-                """
+                '''
                 <div style="border:1px solid #d8e6dc;border-radius:18px;padding:1.1rem 1.2rem;background:#fff;">
                   Run Table A/B to select the tentative starting point.
                 </div>
-                """,
+                ''',
                 unsafe_allow_html=True,
             )
             return
@@ -7268,6 +7268,7 @@ elif st.session_state.page == 4:
         selected_line = str(sp.get("selected_line", "") or "")
         selected_cause = str(sp.get("selected_cause", "") or "Not selected")
         selected_code = str(sp.get("selected_code", "") or "Pending")
+        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
 
         if status == "block" or bool(result.get("blocking") or sp.get("blocking")):
             accent = "#c0392b"; bg = "#fff5f5"; border = "#e4a6a6"; icon = "✕"; status_text = "Blocked"
@@ -7276,74 +7277,63 @@ elif st.session_state.page == 4:
         else:
             accent = "#006940"; bg = "#ffffff"; border = "#d8e6dc"; icon = "●"; status_text = "Passed"
 
-        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
-
-        # One clean rule sentence and one clean reason sentence.
         if sp_rule == "SP1":
-            rule_sentence = "SP1"
-            selected_reason = (
-                "Only one Part I condition was entered, so the same condition is treated as both the immediate cause "
-                "and the tentative underlying cause."
-            )
+            decision_title = "SP1 selected the only Part I cause."
+            decision_reason = "Only one Part I condition is entered, so it is treated as both the immediate cause and the tentative underlying cause."
         elif sp_rule == "SP2":
-            rule_sentence = "SP2"
-            selected_reason = (
-                "Several illnesses were written on one line. The workflow blocks finalization until the doctor splits "
-                "them into a clear stacked causal chain."
-            )
+            decision_title = "SP2 issue detected."
+            decision_reason = "Several illnesses appear on one line. Split them into separate Part I lines before final certification."
         elif sp_rule == "SP3":
-            rule_sentence = "SP3"
-            selected_reason = (
-                "The bottom Part I condition was found in Table A as an acceptable cause of every condition above it. "
-                "Therefore the bottom condition is selected as the tentative UCOD."
-            )
+            decision_title = "SP3 selected the bottom Part I cause."
+            decision_reason = "The bottom condition was found in Table A as an acceptable cause of every condition above it."
         elif sp_rule == "SP4":
-            rule_sentence = "SP4"
-            selected_reason = (
-                "Table A did not confirm the full bottom-cause sequence, but it confirmed a partial causal run that reaches "
-                "line (a). The origin of that valid run is selected as the review candidate."
-            )
+            decision_title = "SP4 selected a valid partial causal sequence."
+            decision_reason = "The full bottom-cause test failed, but Table A confirmed a lower-line causal run that reaches line (a)."
         elif sp_rule == "SP5":
-            rule_sentence = "SP5"
-            selected_reason = (
-                "Table A did not confirm that the bottom condition explains the certificate, and no acceptable lower-line "
-                "sequence reaching line (a) was established. Therefore the first-mentioned Part I condition, line (a), remains "
-                "the review candidate."
-            )
+            decision_title = "SP5 kept line (a) as the review candidate."
+            decision_reason = "The bottom condition did not explain all upper lines, and no acceptable adjacent causal run reached line (a)."
         elif "SP6" in (sp.get("rule_path", []) or []):
-            rule_sentence = "SP6"
-            selected_reason = "Table B found an obvious-cause relationship and shifted the tentative starting point."
+            decision_title = "SP6 Table B shift applied."
+            decision_reason = "Table B found an obvious-cause relationship and shifted the tentative starting point."
         else:
-            rule_sentence = sp_rule or "REVIEW"
-            selected_reason = str(sp.get("explanation", "") or result.get("summary", "") or "Manual review is recommended.")
+            decision_title = "Manual review recommended."
+            decision_reason = str(sp.get("explanation", "") or result.get("summary", "") or "The rule engine could not make a clean automatic decision.")
 
         quality = sp.get("sp7_sp8_quality", {}) or {}
         sp7 = bool(quality.get("sp7_ill_defined"))
         sp8 = bool(quality.get("sp8_unlikely_or_unacceptable"))
         injury_external = bool(quality.get("injury_without_external_cause"))
         if sp7 or injury_external or bool(sp.get("blocking") or result.get("blocking")):
-            quality_line = "Blocked by quality gate: "
-            if sp7:
-                quality_line += "selected cause is ill-defined/terminal. "
-            if injury_external:
-                quality_line += "injury is missing an external cause/mechanism. "
-            quality_line += "Doctor should revise the certificate."
+            quality_text = "Blocked: selected cause needs doctor correction before final certificate."
             quality_color = "#c0392b"
         elif sp8:
-            quality_line = "Review suggested: selected cause may be unacceptable or unlikely as UCOD."
+            quality_text = "Review: selected cause may be unacceptable or unlikely as UCOD."
             quality_color = "#a66a00"
         else:
-            quality_line = "SP7/SP8 passed: not ill-defined and not marked unacceptable."
+            quality_text = "Passed: not ill-defined and not marked unacceptable."
             quality_color = "#006940"
 
-        def _yes_no_box(link: Dict, i: int, title_prefix: str) -> str:
+        def _short_reason(link: Dict) -> str:
+            if link.get("accepted") is True:
+                return "Found in Table A."
+            reason = str(link.get("reason", "") or "")
+            low = reason.lower()
+            if "no taba anchor" in low or "no table a anchor" in low:
+                return "No Table A address was found for the effect code."
+            if "does not list" in low or "not list" in low:
+                return "The searched cause is not listed under this Table A address."
+            if reason:
+                return reason.split(". Tried")[0].strip() + "."
+            return "Not found in Table A."
+
+        def _evidence_row(link: Dict, i: int, label: str) -> str:
             accepted = link.get("accepted")
             if accepted is True:
-                box_border = "#b8dec6"; box_bg = "#f3fbf6"; mark = "✅"; verdict = "Found in Table A → acceptable"
+                mark = "✓"; color = "#006940"; row_bg = "#f3fbf6"; result_text = "Acceptable"
             elif accepted is False:
-                box_border = "#efb8b8"; box_bg = "#fff7f7"; mark = "✕"; verdict = "Not found in Table A → not acceptable"
+                mark = "✕"; color = "#c0392b"; row_bg = "#fff7f7"; result_text = "Not acceptable"
             else:
-                box_border = "#edd187"; box_bg = "#fffaf0"; mark = "⚠"; verdict = "Could not confirm from Table A"
+                mark = "?"; color = "#a66a00"; row_bg = "#fffaf0"; result_text = "Needs review"
 
             upper_line = str(link.get("upper_line", "") or "")
             upper_cause = str(link.get("upper_cause", "") or "")
@@ -7351,114 +7341,104 @@ elif st.session_state.page == 4:
             lower_line = str(link.get("lower_line", "") or "")
             lower_cause = str(link.get("lower_cause", "") or "")
             lower_code = str(link.get("lower_code", "") or "")
-            reason = str(link.get("reason", "") or "")
+            reason = _short_reason(link)
 
-            question = f"Can {lower_cause} ({lower_code}) cause {upper_cause} ({upper_code})?"
-            return (
-                f"<div style='border:1px solid {box_border};border-radius:12px;padding:.75rem .85rem;margin:.55rem 0;background:{box_bg};line-height:1.55;'>"
-                f"<div style='font-weight:900;color:#172033;margin-bottom:.25rem;'>{mark} {escape(title_prefix)} {i}</div>"
-                f"<div style='font-weight:800;color:#10233f;margin-bottom:.25rem;'>{escape(question)}</div>"
-                f"<div><b>Address / effect:</b> Part I ({escape(upper_line)}) — {escape(upper_cause)} <b>{escape(upper_code)}</b></div>"
-                f"<div><b>Search cause:</b> Part I ({escape(lower_line)}) — {escape(lower_cause)} <b>{escape(lower_code)}</b></div>"
-                f"<div><b>Table A output:</b> {escape(verdict)}</div>"
-                + (f"<div style='font-size:.86rem;color:#506256;margin-top:.25rem;'><b>Table reason:</b> {escape(reason)}</div>" if reason else "")
-                + "</div>"
-            )
+            return f'''
+            <div style="display:grid;grid-template-columns:36px 1fr;gap:.65rem;align-items:flex-start;border:1px solid #e5eee9;border-radius:12px;background:{row_bg};padding:.7rem .8rem;margin:.5rem 0;">
+              <div style="width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#fff;color:{color};font-weight:900;border:1px solid #e5eee9;">{mark}</div>
+              <div style="line-height:1.45;">
+                <div style="font-weight:900;color:#10233f;margin-bottom:.15rem;">{escape(label)} {i}: {escape(result_text)}</div>
+                <div><b>Cause searched:</b> Part I ({escape(lower_line)}) — {escape(lower_cause)} <b>{escape(lower_code)}</b></div>
+                <div><b>Effect / Table A address:</b> Part I ({escape(upper_line)}) — {escape(upper_cause)} <b>{escape(upper_code)}</b></div>
+                <div style="color:#506256;margin-top:.15rem;"><b>Table A reason:</b> {escape(reason)}</div>
+              </div>
+            </div>
+            '''
 
         bottom_checks = taba.get("sp3_bottom_checks") or taba.get("links") or []
         adjacent_links = taba.get("adjacent_links") or []
 
-        table_a_html = ""
+        sections_html = ""
         if bottom_checks:
-            bottom_name = ""
-            try:
-                last = bottom_checks[0]
-                bottom_name = f"{last.get('lower_cause','')} ({last.get('lower_code','')})"
-            except Exception:
-                bottom_name = "the bottom condition"
-            boxes = "".join(_yes_no_box(x, i, "SP3 bottom test") for i, x in enumerate(bottom_checks, start=1))
-            if sp_rule == "SP3" and all(x.get("accepted") is True for x in bottom_checks):
-                summary = "All bottom-cause checks are found, so SP3 selects the bottom condition."
-                summary_color = "#006940"
-            else:
-                summary = "One or more bottom-cause checks were not found, so SP3 is not confirmed."
-                summary_color = "#a66a00"
-            table_a_html += (
-                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
-                "<div style='font-weight:900;color:#10233f;font-size:1rem;'>Table A evidence — SP3 bottom-cause test</div>"
-                f"<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>Testing whether {escape(bottom_name)} explains every line above it.</div>"
-                + boxes +
-                f"<div style='font-weight:900;color:{summary_color};margin-top:.6rem;'>{escape(summary)}</div>"
-                "</div>"
+            bottom_ok = all(x.get("accepted") is True for x in bottom_checks)
+            bottom_summary = (
+                "All bottom-cause checks were accepted, so the bottom condition can explain the whole chain."
+                if bottom_ok else
+                "At least one bottom-cause check failed, so SP3 is not confirmed."
             )
+            bottom_color = "#006940" if bottom_ok else "#a66a00"
+            rows = "".join(_evidence_row(x, i, "Bottom test") for i, x in enumerate(bottom_checks, start=1))
+            sections_html += f'''
+            <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
+              <div style="font-weight:900;color:#10233f;font-size:1rem;">Table A — SP3 bottom-cause test</div>
+              <div style="font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;">Question: does the lowest Part I condition explain every line above it?</div>
+              {rows}
+              <div style="font-weight:900;color:{bottom_color};margin-top:.55rem;">{escape(bottom_summary)}</div>
+            </div>
+            '''
 
         if sp_rule in {"SP4", "SP5"} and adjacent_links:
-            adj_boxes = "".join(_yes_no_box(x, i, "Adjacent link") for i, x in enumerate(adjacent_links, start=1))
-            if sp_rule == "SP4":
-                adj_summary = "At least one adjacent causal run reaches line (a), so SP4 selects the origin of that run."
-                adj_color = "#006940"
-            else:
-                adj_summary = "No acceptable adjacent causal run reaches line (a), so SP5 keeps line (a) as the review candidate."
-                adj_color = "#a66a00"
-            table_a_html += (
-                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
-                "<div style='font-weight:900;color:#10233f;font-size:1rem;'>Table A evidence — adjacent chain test for SP4/SP5</div>"
-                "<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>Testing the doctor-entered stacked chain line by line.</div>"
-                + adj_boxes +
-                f"<div style='font-weight:900;color:{adj_color};margin-top:.6rem;'>{escape(adj_summary)}</div>"
-                "</div>"
+            any_ok = any(x.get("accepted") is True for x in adjacent_links)
+            adj_summary = (
+                "Some adjacent links were accepted, but they did not establish a clean sequence reaching line (a)."
+                if sp_rule == "SP5" and any_ok else
+                "No acceptable adjacent causal run reaches line (a)."
+                if sp_rule == "SP5" else
+                "An acceptable adjacent causal run reaches line (a), so SP4 can select its origin."
             )
+            adj_color = "#006940" if sp_rule == "SP4" else "#a66a00"
+            rows = "".join(_evidence_row(x, i, "Chain link") for i, x in enumerate(adjacent_links, start=1))
+            sections_html += f'''
+            <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
+              <div style="font-weight:900;color:#10233f;font-size:1rem;">Table A — stacked-chain test for SP4/SP5</div>
+              <div style="font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;">Question: does each lower line explain the line immediately above it?</div>
+              {rows}
+              <div style="font-weight:900;color:{adj_color};margin-top:.55rem;">{escape(adj_summary)}</div>
+            </div>
+            '''
 
-        if not table_a_html:
-            table_a_html = (
-                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;color:#415a4d;'>"
-                "<b>Table A:</b> No Table A lookup is required for this case, or no Table A output is available."
-                "</div>"
-            )
+        if not sections_html:
+            sections_html = '''
+            <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;color:#415a4d;">
+              <b>Table A:</b> No Table A lookup is required for this case, or no Table A evidence is available.
+            </div>
+            '''
 
         tabb_matches = (tabb.get("matches") or []) + (tabb.get("reverse_matches") or [])
         if tabb_matches or sp.get("sp6_trace"):
-            table_b_text = "Table B found a possible obvious-cause relationship; review the trace."
+            table_b_text = "Table B found a possible obvious-cause relationship. Review before finalizing."
             table_b_color = "#a66a00"
         else:
-            table_b_text = "Table B found no obvious-cause shift."
+            table_b_text = "No Table B obvious-cause shift was found."
             table_b_color = "#006940"
 
         st.markdown(
-            f"""
+            f'''
             <div style="border:1px solid {border};border-radius:18px;padding:1.15rem 1.25rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
               <div style="font-size:1.25rem;font-weight:900;color:#10233f;margin-bottom:.25rem;">
-                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Starting point selected
+                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Starting point decision
               </div>
-              <div style="font-weight:900;color:{accent};margin-bottom:.85rem;">Status: {escape(status_text)}</div>
+              <div style="font-weight:900;color:{accent};margin-bottom:.9rem;">Status: {escape(status_text)}</div>
 
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.85rem;">
-                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
-                  <b>Tentative UCOD</b><br>{escape(selected_cause)} — <b>{escape(selected_code)}</b>
-                </div>
-                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
-                  <b>Selected line</b><br>{escape(line_label)}
-                </div>
-                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
-                  <b>Applied rule</b><br>{escape(rule_sentence)}
-                </div>
-                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
-                  <b>Quality gate</b><br><span style="color:{quality_color};font-weight:800;">{escape(quality_line)}</span>
-                </div>
+              <div style="border-left:4px solid {accent};background:#fff;border-radius:12px;padding:.75rem .85rem;line-height:1.55;margin-bottom:.75rem;">
+                <div style="font-weight:900;color:#10233f;">{escape(decision_title)}</div>
+                <div><b>Tentative UCOD:</b> {escape(selected_cause)} — <b>{escape(selected_code)}</b></div>
+                <div><b>Selected line:</b> {escape(line_label)} &nbsp; | &nbsp; <b>Rule:</b> {escape(sp_rule)}</div>
+                <div style="margin-top:.2rem;"><b>Why:</b> {escape(decision_reason)}</div>
               </div>
 
-              <div style="border-left:4px solid {accent};padding:.55rem .75rem;background:#ffffff;border-radius:10px;line-height:1.55;">
-                <b>Why this line was selected:</b> {escape(selected_reason)}
+              <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .85rem;line-height:1.45;">
+                <b>Quality gate:</b> <span style="color:{quality_color};font-weight:900;">{escape(quality_text)}</span>
               </div>
 
-              {table_a_html}
+              {sections_html}
 
               <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
-                <div style="font-weight:900;color:#10233f;font-size:1rem;">Table B check</div>
+                <div style="font-weight:900;color:#10233f;font-size:1rem;">Table B — obvious-cause check</div>
                 <div style="color:{table_b_color};font-weight:800;margin-top:.25rem;">{escape(table_b_text)}</div>
               </div>
             </div>
-            """,
+            ''',
             unsafe_allow_html=True,
         )
 
