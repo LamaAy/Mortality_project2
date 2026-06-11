@@ -7281,7 +7281,10 @@ elif st.session_state.page == 4:
         elif sp_rule == "SP2":
             rule_sentence = "SP2: several illnesses were written on one line; the workflow blocks finalization until the doctor separates them into a stacked causal chain."
         elif sp_rule == "SP3":
-            rule_sentence = "SP3: Table A supports the full causal sequence."
+            rule_sentence = (
+                f"SP3: the lowest Part I condition ({selected_cause} — {selected_code}) "
+                "was found in Table A as an acceptable cause of every condition above it."
+            )
         elif sp_rule == "SP4":
             rule_sentence = "SP4: Table A supports a partial sequence leading to line (a)."
         elif sp_rule == "SP5":
@@ -7294,9 +7297,51 @@ elif st.session_state.page == 4:
         taba_links = taba.get("links") or []
         if taba_links:
             valid = bool(taba.get("valid_sequence"))
-            table_a_sentence = "Table A sequence accepted." if valid else "Table A sequence needs review."
+            if sp_rule == "SP3" and valid:
+                table_a_sentence = "Table A confirmed SP3: the bottom condition explains all conditions above."
+            else:
+                table_a_sentence = "Table A sequence accepted." if valid else "Table A sequence needs review."
         else:
             table_a_sentence = "No adjacent Table A link is needed for a single-cause certificate."
+
+        sp3_checks_html = ""
+        if sp_rule == "SP3" and taba_links:
+            check_rows = []
+            for i, link in enumerate(taba_links, start=1):
+                accepted = link.get("accepted")
+                if accepted is True:
+                    mark = "✅"
+                    outcome = "Found → acceptable"
+                elif accepted is False:
+                    mark = "✕"
+                    outcome = "Not found → not acceptable"
+                else:
+                    mark = "⚠"
+                    outcome = "Could not confirm"
+
+                upper_line = str(link.get("upper_line", "") or "")
+                upper_cause = str(link.get("upper_cause", "") or "")
+                upper_code = str(link.get("upper_code", "") or "")
+                lower_cause = str(link.get("lower_cause", "") or selected_cause or "")
+                lower_code = str(link.get("lower_code", "") or selected_code or "")
+                check_rows.append(
+                    "<div style='border:1px solid #e5eee9;border-radius:10px;padding:.65rem .75rem;margin:.45rem 0;background:#ffffff;'>"
+                    f"<b>{mark} Check {i}</b><br>"
+                    f"Address/effect: Part I ({escape(upper_line)}) — {escape(upper_cause)} ({escape(upper_code)})<br>"
+                    f"Search cause: {escape(lower_cause)} ({escape(lower_code)})<br>"
+                    f"Result: <b>{escape(outcome)}</b>"
+                    "</div>"
+                )
+            sp3_checks_html = (
+                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
+                "<b>SP3 Table A checks</b>"
+                "<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>"
+                "For each check, the upper line is the Table A address/effect, and the bottom line is the cause searched underneath."
+                "</div>"
+                + "".join(check_rows) +
+                "<div style='font-weight:900;color:#006940;margin-top:.6rem;'>All checks were accepted, so the bottom condition is selected as the tentative starting point / UCOD candidate.</div>"
+                "</div>"
+            )
 
         tabb_matches = (tabb.get("matches") or []) + (tabb.get("reverse_matches") or [])
         if tabb_matches or sp.get("sp6_trace"):
@@ -7337,6 +7382,7 @@ elif st.session_state.page == 4:
                 <b>Table B:</b> {escape(table_b_sentence)}<br>
                 <b>Quality gate:</b> {escape(quality_sentence)}
               </div>
+              {sp3_checks_html}
             </div>
             """,
             unsafe_allow_html=True,
