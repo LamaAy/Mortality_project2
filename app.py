@@ -7247,12 +7247,12 @@ elif st.session_state.page == 4:
         return len(part1) == 1
 
     def _render_rules_result_simple(result: Dict) -> None:
-        """Compact doctor-facing Table A/B + final SP7/SP8 gate result."""
+        """Doctor-facing Table A/B result with explicit table output boxes and clear reason for selected line."""
         if not result:
             st.markdown(
                 """
                 <div style="border:1px solid #d8e6dc;border-radius:18px;padding:1.1rem 1.2rem;background:#fff;">
-                  Run the Table A/B check to select the tentative starting point.
+                  Run Table A/B to select the tentative starting point.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -7261,128 +7261,202 @@ elif st.session_state.page == 4:
 
         status = str(result.get("status", "warning") or "warning").lower()
         sp = result.get("sp_review", {}) or {}
-        taba = result.get("taba_sequence", {}) or {}
+        taba = result.get("taba_sequence", {}) or sp.get("taba_sequence", {}) or {}
         tabb = result.get("tabb_result", {}) or {}
+
         sp_rule = str(sp.get("base_sp_rule", sp.get("sp_rule", "REVIEW")) or "REVIEW")
         selected_line = str(sp.get("selected_line", "") or "")
         selected_cause = str(sp.get("selected_cause", "") or "Not selected")
         selected_code = str(sp.get("selected_code", "") or "Pending")
-        explanation = str(sp.get("explanation", "") or result.get("summary", "") or "")
 
-        if status == "block":
+        if status == "block" or bool(result.get("blocking") or sp.get("blocking")):
             accent = "#c0392b"; bg = "#fff5f5"; border = "#e4a6a6"; icon = "✕"; status_text = "Blocked"
         elif status == "warning":
             accent = "#a66a00"; bg = "#fffaf0"; border = "#e7c46a"; icon = "⚠"; status_text = "Review suggested"
         else:
             accent = "#006940"; bg = "#ffffff"; border = "#d8e6dc"; icon = "●"; status_text = "Passed"
 
+        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
+
+        # One clean rule sentence and one clean reason sentence.
         if sp_rule == "SP1":
-            rule_sentence = "SP1: only one Part I condition was entered, so it is treated as both immediate cause and tentative underlying cause."
+            rule_sentence = "SP1"
+            selected_reason = (
+                "Only one Part I condition was entered, so the same condition is treated as both the immediate cause "
+                "and the tentative underlying cause."
+            )
         elif sp_rule == "SP2":
-            rule_sentence = "SP2: several illnesses were written on one line; the workflow blocks finalization until the doctor separates them into a stacked causal chain."
+            rule_sentence = "SP2"
+            selected_reason = (
+                "Several illnesses were written on one line. The workflow blocks finalization until the doctor splits "
+                "them into a clear stacked causal chain."
+            )
         elif sp_rule == "SP3":
-            rule_sentence = (
-                f"SP3: the lowest Part I condition ({selected_cause} — {selected_code}) "
-                "was found in Table A as an acceptable cause of every condition above it."
+            rule_sentence = "SP3"
+            selected_reason = (
+                "The bottom Part I condition was found in Table A as an acceptable cause of every condition above it. "
+                "Therefore the bottom condition is selected as the tentative UCOD."
             )
         elif sp_rule == "SP4":
-            rule_sentence = "SP4: Table A supports a partial sequence leading to line (a)."
-        elif sp_rule == "SP5":
-            rule_sentence = "SP5: Table A did not confirm a valid sequence, so the first-mentioned condition remains the review candidate."
-        elif "SP6" in (sp.get("rule_path", []) or []):
-            rule_sentence = "SP6: Table B found an obvious-cause relationship and shifted the tentative starting point."
-        else:
-            rule_sentence = explanation or "Manual review is recommended."
-
-        taba_links = taba.get("links") or []
-        if taba_links:
-            valid = bool(taba.get("valid_sequence"))
-            if sp_rule == "SP3" and valid:
-                table_a_sentence = "Table A confirmed SP3: the bottom condition explains all conditions above."
-            else:
-                table_a_sentence = "Table A sequence accepted." if valid else "Table A sequence needs review."
-        else:
-            table_a_sentence = "No adjacent Table A link is needed for a single-cause certificate."
-
-        sp3_checks_html = ""
-        if sp_rule == "SP3" and taba_links:
-            check_rows = []
-            for i, link in enumerate(taba_links, start=1):
-                accepted = link.get("accepted")
-                if accepted is True:
-                    mark = "✅"
-                    outcome = "Found → acceptable"
-                elif accepted is False:
-                    mark = "✕"
-                    outcome = "Not found → not acceptable"
-                else:
-                    mark = "⚠"
-                    outcome = "Could not confirm"
-
-                upper_line = str(link.get("upper_line", "") or "")
-                upper_cause = str(link.get("upper_cause", "") or "")
-                upper_code = str(link.get("upper_code", "") or "")
-                lower_cause = str(link.get("lower_cause", "") or selected_cause or "")
-                lower_code = str(link.get("lower_code", "") or selected_code or "")
-                check_rows.append(
-                    "<div style='border:1px solid #e5eee9;border-radius:10px;padding:.65rem .75rem;margin:.45rem 0;background:#ffffff;'>"
-                    f"<b>{mark} Check {i}</b><br>"
-                    f"Address/effect: Part I ({escape(upper_line)}) — {escape(upper_cause)} ({escape(upper_code)})<br>"
-                    f"Search cause: {escape(lower_cause)} ({escape(lower_code)})<br>"
-                    f"Result: <b>{escape(outcome)}</b>"
-                    "</div>"
-                )
-            sp3_checks_html = (
-                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
-                "<b>SP3 Table A checks</b>"
-                "<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>"
-                "For each check, the upper line is the Table A address/effect, and the bottom line is the cause searched underneath."
-                "</div>"
-                + "".join(check_rows) +
-                "<div style='font-weight:900;color:#006940;margin-top:.6rem;'>All checks were accepted, so the bottom condition is selected as the tentative starting point / UCOD candidate.</div>"
-                "</div>"
+            rule_sentence = "SP4"
+            selected_reason = (
+                "Table A did not confirm the full bottom-cause sequence, but it confirmed a partial causal run that reaches "
+                "line (a). The origin of that valid run is selected as the review candidate."
             )
-
-        tabb_matches = (tabb.get("matches") or []) + (tabb.get("reverse_matches") or [])
-        if tabb_matches or sp.get("sp6_trace"):
-            table_b_sentence = "Table B found a post-selection relationship; review the selected starting point."
+        elif sp_rule == "SP5":
+            rule_sentence = "SP5"
+            selected_reason = (
+                "Table A did not confirm that the bottom condition explains the certificate, and no acceptable lower-line "
+                "sequence reaching line (a) was established. Therefore the first-mentioned Part I condition, line (a), remains "
+                "the review candidate."
+            )
+        elif "SP6" in (sp.get("rule_path", []) or []):
+            rule_sentence = "SP6"
+            selected_reason = "Table B found an obvious-cause relationship and shifted the tentative starting point."
         else:
-            table_b_sentence = "Table B found no obvious-cause shift."
+            rule_sentence = sp_rule or "REVIEW"
+            selected_reason = str(sp.get("explanation", "") or result.get("summary", "") or "Manual review is recommended.")
 
         quality = sp.get("sp7_sp8_quality", {}) or {}
         sp7 = bool(quality.get("sp7_ill_defined"))
         sp8 = bool(quality.get("sp8_unlikely_or_unacceptable"))
         injury_external = bool(quality.get("injury_without_external_cause"))
-        blocking_quality = bool(result.get("blocking") or sp.get("blocking") or sp7 or injury_external)
-        if blocking_quality:
-            quality_sentence = (
-                "Doctor action required: the selected starting point cannot be finalized. "
-                + ("It is ill-defined/terminal. " if sp7 else "")
-                + ("It appears to be an injury without a documented external cause/mechanism. " if injury_external else "")
-                + "Edit the certificate fields on the left, then rerun ICD Coding and Table A/B."
-            )
+        if sp7 or injury_external or bool(sp.get("blocking") or result.get("blocking")):
+            quality_line = "Blocked by quality gate: "
+            if sp7:
+                quality_line += "selected cause is ill-defined/terminal. "
+            if injury_external:
+                quality_line += "injury is missing an external cause/mechanism. "
+            quality_line += "Doctor should revise the certificate."
+            quality_color = "#c0392b"
         elif sp8:
-            quality_sentence = "Review suggested: the selected starting point may be unacceptable or unlikely as UCOD. Coder review is recommended."
+            quality_line = "Review suggested: selected cause may be unacceptable or unlikely as UCOD."
+            quality_color = "#a66a00"
         else:
-            quality_sentence = "SP7/SP8 check passed: not ill-defined and not marked unacceptable."
+            quality_line = "SP7/SP8 passed: not ill-defined and not marked unacceptable."
+            quality_color = "#006940"
 
-        line_label = f"Part I ({selected_line})" if selected_line in {"a", "b", "c", "d"} else (selected_line or "Not selected")
+        def _yes_no_box(link: Dict, i: int, title_prefix: str) -> str:
+            accepted = link.get("accepted")
+            if accepted is True:
+                box_border = "#b8dec6"; box_bg = "#f3fbf6"; mark = "✅"; verdict = "Found in Table A → acceptable"
+            elif accepted is False:
+                box_border = "#efb8b8"; box_bg = "#fff7f7"; mark = "✕"; verdict = "Not found in Table A → not acceptable"
+            else:
+                box_border = "#edd187"; box_bg = "#fffaf0"; mark = "⚠"; verdict = "Could not confirm from Table A"
+
+            upper_line = str(link.get("upper_line", "") or "")
+            upper_cause = str(link.get("upper_cause", "") or "")
+            upper_code = str(link.get("upper_code", "") or "")
+            lower_line = str(link.get("lower_line", "") or "")
+            lower_cause = str(link.get("lower_cause", "") or "")
+            lower_code = str(link.get("lower_code", "") or "")
+            reason = str(link.get("reason", "") or "")
+
+            question = f"Can {lower_cause} ({lower_code}) cause {upper_cause} ({upper_code})?"
+            return (
+                f"<div style='border:1px solid {box_border};border-radius:12px;padding:.75rem .85rem;margin:.55rem 0;background:{box_bg};line-height:1.55;'>"
+                f"<div style='font-weight:900;color:#172033;margin-bottom:.25rem;'>{mark} {escape(title_prefix)} {i}</div>"
+                f"<div style='font-weight:800;color:#10233f;margin-bottom:.25rem;'>{escape(question)}</div>"
+                f"<div><b>Address / effect:</b> Part I ({escape(upper_line)}) — {escape(upper_cause)} <b>{escape(upper_code)}</b></div>"
+                f"<div><b>Search cause:</b> Part I ({escape(lower_line)}) — {escape(lower_cause)} <b>{escape(lower_code)}</b></div>"
+                f"<div><b>Table A output:</b> {escape(verdict)}</div>"
+                + (f"<div style='font-size:.86rem;color:#506256;margin-top:.25rem;'><b>Table reason:</b> {escape(reason)}</div>" if reason else "")
+                + "</div>"
+            )
+
+        bottom_checks = taba.get("sp3_bottom_checks") or taba.get("links") or []
+        adjacent_links = taba.get("adjacent_links") or []
+
+        table_a_html = ""
+        if bottom_checks:
+            bottom_name = ""
+            try:
+                last = bottom_checks[0]
+                bottom_name = f"{last.get('lower_cause','')} ({last.get('lower_code','')})"
+            except Exception:
+                bottom_name = "the bottom condition"
+            boxes = "".join(_yes_no_box(x, i, "SP3 bottom test") for i, x in enumerate(bottom_checks, start=1))
+            if sp_rule == "SP3" and all(x.get("accepted") is True for x in bottom_checks):
+                summary = "All bottom-cause checks are found, so SP3 selects the bottom condition."
+                summary_color = "#006940"
+            else:
+                summary = "One or more bottom-cause checks were not found, so SP3 is not confirmed."
+                summary_color = "#a66a00"
+            table_a_html += (
+                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
+                "<div style='font-weight:900;color:#10233f;font-size:1rem;'>Table A evidence — SP3 bottom-cause test</div>"
+                f"<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>Testing whether {escape(bottom_name)} explains every line above it.</div>"
+                + boxes +
+                f"<div style='font-weight:900;color:{summary_color};margin-top:.6rem;'>{escape(summary)}</div>"
+                "</div>"
+            )
+
+        if sp_rule in {"SP4", "SP5"} and adjacent_links:
+            adj_boxes = "".join(_yes_no_box(x, i, "Adjacent link") for i, x in enumerate(adjacent_links, start=1))
+            if sp_rule == "SP4":
+                adj_summary = "At least one adjacent causal run reaches line (a), so SP4 selects the origin of that run."
+                adj_color = "#006940"
+            else:
+                adj_summary = "No acceptable adjacent causal run reaches line (a), so SP5 keeps line (a) as the review candidate."
+                adj_color = "#a66a00"
+            table_a_html += (
+                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;'>"
+                "<div style='font-weight:900;color:#10233f;font-size:1rem;'>Table A evidence — adjacent chain test for SP4/SP5</div>"
+                "<div style='font-size:.9rem;color:#415a4d;margin:.25rem 0 .55rem;'>Testing the doctor-entered stacked chain line by line.</div>"
+                + adj_boxes +
+                f"<div style='font-weight:900;color:{adj_color};margin-top:.6rem;'>{escape(adj_summary)}</div>"
+                "</div>"
+            )
+
+        if not table_a_html:
+            table_a_html = (
+                "<div style='margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;color:#415a4d;'>"
+                "<b>Table A:</b> No Table A lookup is required for this case, or no Table A output is available."
+                "</div>"
+            )
+
+        tabb_matches = (tabb.get("matches") or []) + (tabb.get("reverse_matches") or [])
+        if tabb_matches or sp.get("sp6_trace"):
+            table_b_text = "Table B found a possible obvious-cause relationship; review the trace."
+            table_b_color = "#a66a00"
+        else:
+            table_b_text = "Table B found no obvious-cause shift."
+            table_b_color = "#006940"
+
         st.markdown(
             f"""
             <div style="border:1px solid {border};border-radius:18px;padding:1.15rem 1.25rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);">
               <div style="font-size:1.25rem;font-weight:900;color:#10233f;margin-bottom:.25rem;">
                 <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Starting point selected
               </div>
-              <div style="font-weight:900;color:{accent};margin-bottom:.9rem;">Status: {escape(status_text)}</div>
-              <div style="line-height:1.65;color:#172033;">
-                <b>Tentative UCOD:</b> {escape(selected_cause)} — <b>{escape(selected_code)}</b><br>
-                <b>Selected line:</b> {escape(line_label)}<br>
-                <b>Applied rule:</b> {escape(rule_sentence)}<br>
-                <b>Table A:</b> {escape(table_a_sentence)}<br>
-                <b>Table B:</b> {escape(table_b_sentence)}<br>
-                <b>Quality gate:</b> {escape(quality_sentence)}
+              <div style="font-weight:900;color:{accent};margin-bottom:.85rem;">Status: {escape(status_text)}</div>
+
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.85rem;">
+                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
+                  <b>Tentative UCOD</b><br>{escape(selected_cause)} — <b>{escape(selected_code)}</b>
+                </div>
+                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
+                  <b>Selected line</b><br>{escape(line_label)}
+                </div>
+                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
+                  <b>Applied rule</b><br>{escape(rule_sentence)}
+                </div>
+                <div style="border:1px solid #e5eee9;border-radius:12px;background:#fff;padding:.7rem .8rem;">
+                  <b>Quality gate</b><br><span style="color:{quality_color};font-weight:800;">{escape(quality_line)}</span>
+                </div>
               </div>
-              {sp3_checks_html}
+
+              <div style="border-left:4px solid {accent};padding:.55rem .75rem;background:#ffffff;border-radius:10px;line-height:1.55;">
+                <b>Why this line was selected:</b> {escape(selected_reason)}
+              </div>
+
+              {table_a_html}
+
+              <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;">
+                <div style="font-weight:900;color:#10233f;font-size:1rem;">Table B check</div>
+                <div style="color:{table_b_color};font-weight:800;margin-top:.25rem;">{escape(table_b_text)}</div>
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
