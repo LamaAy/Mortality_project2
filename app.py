@@ -809,6 +809,8 @@ LAY_QUERY_EXPANSIONS = {
     "stroke": ["cerebral infarction", "cerebrovascular accident", "intracranial hemorrhage"],
     "kidney failure": ["renal failure", "chronic kidney disease", "acute kidney failure"],
     "high blood pressure": ["hypertension", "essential hypertension"],
+    "heart failure": ["cardiac failure", "congestive heart failure", "I50.9"],
+    "congestive heart failure": ["heart failure", "cardiac failure", "I50.9"],
     "diabetes": ["diabetes mellitus"],
     "type 2 diabetes": ["type 2 diabetes mellitus", "non insulin dependent diabetes mellitus"],
     "type ii diabetes": ["type 2 diabetes mellitus", "non insulin dependent diabetes mellitus"],
@@ -838,6 +840,14 @@ LAY_QUERY_EXPANSIONS = {
     "obesity": ["obesity"],
     "metabolic syndrome": ["metabolic syndrome"],
     "vasculopathy": ["angiopathy", "vascular disease"],
+    "atherosclerosis": ["generalized and unspecified atherosclerosis", "I70.9"],
+    "arteriosclerosis": ["atherosclerosis", "generalized and unspecified atherosclerosis", "I70.9"],
+    "generalised arteriosclerosis": ["generalized and unspecified atherosclerosis", "I70.9"],
+    "generalized arteriosclerosis": ["generalized and unspecified atherosclerosis", "I70.9"],
+    "hardened arteries": ["generalized and unspecified atherosclerosis", "I70.9"],
+    "acute myocardial infarction": ["myocardial infarction", "I21.9"],
+    "myocardial infarction": ["acute myocardial infarction", "I21.9"],
+    "migraine": ["migraine unspecified", "G43.9"],
 }
 
 STOPWORDS = {
@@ -1150,6 +1160,59 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
             if any(t in text for t in ["upper lobe", "lower lobe", "middle lobe", "main bronchus"]):
                 score -= 1.2
                 reasons.append("specific lung site penalized because doctor did not specify site")
+
+    if "heart failure" in q or "cardiac failure" in q or "congestive heart failure" in q:
+        # Generic heart failure should code to the I50 family. Avoid rheumatic heart failure
+        # unless the doctor explicitly mentions rheumatic disease.
+        if code_norm.startswith("I50"):
+            score += 8.0
+            reasons.append("preferred generic heart failure family I50")
+        if code_norm.startswith("I509") or code == "I50.9":
+            score += 3.0
+            reasons.append("preferred unspecified heart failure I50.9")
+        if code_norm.startswith("I09") and "rheumatic" not in q:
+            score -= 6.0
+            reasons.append("rheumatic heart failure penalized because rheumatic disease was not stated")
+        if code_norm.startswith(("I11", "I13")) and not any(t in q for t in ["hypertensive", "hypertension", "renal", "kidney"]):
+            score -= 3.0
+            reasons.append("hypertensive/renal heart disease penalized because not stated")
+
+    if any(t in q for t in ["atherosclerosis", "arteriosclerosis", "hardened arteries"]):
+        site_terms = ["leg", "foot", "extremit", "limb", "coronary", "heart", "aorta", "renal", "kidney", "cerebral", "carotid"]
+        generic_ath = not any(t in q for t in site_terms) or "unspecified" in q or "generalized" in q or "generalised" in q
+        if generic_ath:
+            if code_norm.startswith("I709") or code == "I70.9":
+                score += 10.0
+                reasons.append("preferred generalized/unspecified atherosclerosis I70.9")
+            elif code_norm.startswith("I70"):
+                score += 3.0
+                reasons.append("preferred atherosclerosis family I70")
+            if code_norm.startswith(("I702", "I257", "I25")):
+                score -= 5.0
+                reasons.append("site-specific/coronary atherosclerosis penalized because doctor did not specify site")
+        else:
+            if code_norm.startswith("I70") or code_norm.startswith("I25"):
+                score += 2.0
+
+    if "acute myocardial infarction" in q or "myocardial infarction" in q or "heart attack" in q:
+        if code_norm.startswith("I21"):
+            score += 6.0
+            reasons.append("preferred acute myocardial infarction family I21")
+        if code_norm.startswith("I219") or code == "I21.9":
+            score += 2.0
+            reasons.append("preferred unspecified acute myocardial infarction I21.9")
+
+    if "migraine" in q:
+        if code_norm.startswith("G43"):
+            score += 5.0
+            reasons.append("preferred migraine family G43")
+        if code_norm.startswith("G439") or code == "G43.9":
+            score += 3.0
+            reasons.append("preferred unspecified migraine G43.9 for generic migraine text")
+        # Avoid overly specific migraine variants when doctor only wrote 'migraine'.
+        if q.strip() == "migraine" and code_norm.startswith("G430"):
+            score -= 2.0
+            reasons.append("specific migraine subtype penalized because doctor did not specify subtype")
 
     if "acute respiratory distress syndrome" in q or re.fullmatch(r"ards", q):
         if code.startswith("J80"):
@@ -5774,6 +5837,44 @@ def _candidate_rank_adjustment_for_query(code: str, title: str, query: str) -> f
                 score += 2.0
             if any(t in text for t in ["upper lobe", "lower lobe", "middle lobe", "main bronchus"]):
                 score -= 1.0
+    if "heart failure" in q or "cardiac failure" in q or "congestive heart failure" in q:
+        if code_norm.startswith("I50"):
+            score += 12.0
+        if code_norm.startswith("I509") or code.upper() == "I50.9":
+            score += 4.0
+        if code_norm.startswith("I09") and "rheumatic" not in q:
+            score -= 10.0
+        if code_norm.startswith(("I11", "I13")) and not any(t in q for t in ["hypertensive", "hypertension", "renal", "kidney"]):
+            score -= 4.0
+
+    if any(t in q for t in ["atherosclerosis", "arteriosclerosis", "hardened arteries"]):
+        site_terms = ["leg", "foot", "extremit", "limb", "coronary", "heart", "aorta", "renal", "kidney", "cerebral", "carotid"]
+        generic_ath = not any(t in q for t in site_terms) or "unspecified" in q or "generalized" in q or "generalised" in q
+        if generic_ath:
+            if code_norm.startswith("I709") or code.upper() == "I70.9":
+                score += 14.0
+            elif code_norm.startswith("I70"):
+                score += 4.0
+            if code_norm.startswith(("I702", "I25")):
+                score -= 8.0
+        else:
+            if code_norm.startswith("I70") or code_norm.startswith("I25"):
+                score += 2.0
+
+    if "acute myocardial infarction" in q or "myocardial infarction" in q or "heart attack" in q:
+        if code_norm.startswith("I21"):
+            score += 10.0
+        if code_norm.startswith("I219") or code.upper() == "I21.9":
+            score += 3.0
+
+    if "migraine" in q:
+        if code_norm.startswith("G43"):
+            score += 8.0
+        if code_norm.startswith("G439") or code.upper() == "G43.9":
+            score += 4.0
+        if q.strip() == "migraine" and code_norm.startswith("G430"):
+            score -= 3.0
+
     return score
 
 
@@ -6044,6 +6145,60 @@ def _enrich_who_candidate_with_local_flags(c: Dict, df_source: pd.DataFrame, que
     return x
 
 
+def _preferred_icd10_candidates_for_query(query: str, df_source: pd.DataFrame, release_id: str = "2019") -> List[Dict]:
+    """
+    Deterministic safety candidates for common plain-language diagnoses.
+    This prevents generic doctor text from defaulting to overly specific or wrong codes
+    such as Heart failure -> I09.81 or unspecified atherosclerosis -> I70.2.
+    WHO/API retrieval is still used; these entries simply rank the correct generic
+    code near the top and remain auditable as query-normalized candidates.
+    """
+    q = normalize_text_basic(query)
+    picks: List[Tuple[str, str]] = []
+
+    if "heart failure" in q or "cardiac failure" in q or "congestive heart failure" in q:
+        if "rheumatic" not in q:
+            picks.append(("I50.9", "Heart failure, unspecified"))
+
+    if "acute myocardial infarction" in q or "myocardial infarction" in q or "heart attack" in q:
+        picks.append(("I21.9", "Acute myocardial infarction, unspecified"))
+
+    if any(t in q for t in ["atherosclerosis", "arteriosclerosis", "hardened arteries"]):
+        site_terms = ["leg", "foot", "extremit", "limb", "coronary", "heart", "aorta", "renal", "kidney", "cerebral", "carotid"]
+        if not any(t in q for t in site_terms) or "unspecified" in q or "generalized" in q or "generalised" in q:
+            picks.append(("I70.9", "Generalized and unspecified atherosclerosis"))
+
+    if q.strip() == "migraine" or q.endswith(" migraine") or q.startswith("migraine "):
+        picks.append(("G43.9", "Migraine, unspecified"))
+
+    out: List[Dict] = []
+    seen = set()
+    for code, fallback_title in picks:
+        norm = code_norm_for_rules(code)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        title = fallback_title
+        try:
+            concept = who_browser_get_concept_cached(code, release_id=release_id)
+            title = concept.get("title") or fallback_title
+        except Exception:
+            pass
+        row = _local_row_for_selected_code(df_source, code)
+        if row is not None:
+            title = str(row.get("ShortDesc", "") or row.get("LongDesc", "") or title)
+        out.append({
+            "code_formatted": code,
+            "code": code_norm_for_rules(code),
+            "short_desc": title,
+            "long_desc": title,
+            "source": "Preferred ICD candidate from query normalization",
+            "retrieval_source": "Preferred ICD candidate from query normalization",
+            "score": 100.0,
+        })
+    return out
+
+
 def _add_tree_children_for_candidates(candidates: List[Dict], df_source: pd.DataFrame, query: str, release_id: str, max_children_per_parent: int = 12) -> List[Dict]:
     out: List[Dict] = []
     seen = set()
@@ -6127,6 +6282,12 @@ def retrieve_icd10_candidates_who_first(
             audit["steps"].append({"source": "WHO ICD API foundation search", "status": "failed", "error": f"{type(e).__name__}: {e}"})
     else:
         audit["steps"].append({"source": "WHO ICD API foundation search", "status": "not_configured"})
+
+    # Add deterministic preferred candidates for common generic diagnoses before tree/ranking.
+    preferred = _preferred_icd10_candidates_for_query(q, df_source, release_id=release_id)
+    if preferred:
+        candidates.extend(preferred)
+        audit["steps"].append({"source": "Preferred ICD candidate normalization", "status": "used", "count": len(preferred)})
 
     # If WHO produced code candidates, fetch the tree children and enrich with local flags.
     candidates = _add_tree_children_for_candidates(candidates, df_source, q, release_id=release_id)
