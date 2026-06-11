@@ -1590,15 +1590,20 @@ def pre_validate_structured_cod(part1_chain: List[Dict], part2_conditions: List[
     for label, x in all_lines:
         cause = x.get("cause", "")
         if has_multiple_causes_in_one_line(cause):
-            # SP2-compatible behaviour: do not hard block the certificate only because
-            # multiple conditions were typed on one line. Give a strong doctor-facing
-            # prompt to split the line, but allow the rule workflow to proceed.
+            # Doctor-facing SP2 guardrail. WHO SP2 can select the first-mentioned
+            # condition when several illnesses are crammed onto one Part I line,
+            # but this app should not let that poor certificate format proceed.
+            # The doctor must split the conditions into a stacked causal chain.
             issues.append({
-                "severity": "warning",
+                "severity": "error",
                 "line": label,
-                "type": "multiple_causes_soft_sp2",
-                "message": "More than one condition appears on this line. One condition per line is recommended; if left unchanged, SP2 will treat the first-mentioned condition as the tentative starting point.",
-                "blocking": False,
+                "type": "sp2_multiple_causes_one_line_block",
+                "sp_rule": "SP2",
+                "message": (
+                    "SP2 issue: several illnesses appear on one line instead of a stacked causal chain. "
+                    "Enter one condition per Part I line, with the immediate cause on line (a) and the underlying cause on a lower line."
+                ),
+                "blocking": True,
             })
         if looks_like_non_medical_sentence(cause):
             issues.append({
@@ -1765,10 +1770,12 @@ def validate_cause_line_from_excel(
 
     if has_multiple_causes_in_one_line(cause):
         issues.append({
-            "severity": "warning",
+            "severity": "error",
             "line": line_label,
-            "type": "multiple_causes",
-            "message": "Only one disease or condition should be entered on this line.",
+            "type": "sp2_multiple_causes_one_line_block",
+            "message": (
+                "SP2 issue: several illnesses appear on one line. Split them into separate Part I lines before ICD coding."
+            ),
         })
 
     candidates = search_icd_candidates(
@@ -5289,12 +5296,35 @@ def apply_sp1_to_sp5_with_taba(coded_causes: List[Dict], taba_df: pd.DataFrame) 
 
     if len(part1) == 1:
         x = part1[0]
+        if has_multiple_causes_in_one_line(x.get("cause", "")):
+            return {
+                "base_sp_rule": "SP2",
+                "sp_rule": "SP2",
+                "selected_line": x.get("line", ""),
+                "selected_cause": x.get("cause", ""),
+                "selected_code": x.get("code_formatted", ""),
+                "full_sequence_valid": None,
+                "partial_sequence_valid": None,
+                "causal_links": [],
+                "warnings": [
+                    "SP2 block: several illnesses are written on one Part I line. Split them into separate Part I lines before ICD coding and final certification."
+                ],
+                "needs_manual_review": True,
+                "blocking": True,
+                "explanation": (
+                    "SP2 detected: multiple conditions are crammed into one Part I line. "
+                    "Although SP2 can take the first-mentioned condition as a tentative starting point, "
+                    "the doctor-facing workflow blocks this and asks the doctor to rewrite the causal chain."
+                ),
+                "rule_path": ["SP2"],
+            }
         return {
             "sp_rule": "SP2", "selected_line": x.get("line", ""), "selected_cause": x.get("cause", ""),
             "selected_code": x.get("code_formatted", ""), "full_sequence_valid": None,
             "partial_sequence_valid": None, "causal_links": [],
             "warnings": ["Only one Part I line is used. If multiple conditions were typed into one line, split them for clearer certification."],
             "needs_manual_review": False,
+            "blocking": False,
             "explanation": "SP2 applied: only one Part I line is used. The first-mentioned condition remains the tentative starting point.",
         }
 
@@ -7249,7 +7279,7 @@ elif st.session_state.page == 4:
         if sp_rule == "SP1":
             rule_sentence = "SP1: only one Part I condition was entered, so it is treated as both immediate cause and tentative underlying cause."
         elif sp_rule == "SP2":
-            rule_sentence = "SP2: one usable Part I line is treated as the tentative starting point."
+            rule_sentence = "SP2: several illnesses were written on one line; the workflow blocks finalization until the doctor separates them into a stacked causal chain."
         elif sp_rule == "SP3":
             rule_sentence = "SP3: Table A supports the full causal sequence."
         elif sp_rule == "SP4":
