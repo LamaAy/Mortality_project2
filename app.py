@@ -7247,12 +7247,9 @@ elif st.session_state.page == 4:
         return len(part1) == 1
 
     def _render_rules_result_simple(result: Dict) -> None:
-        """Doctor-facing SP3-only Table A result.
-
-        Uses Streamlit native table/dataframe instead of raw HTML tables so the
-        output stays inside the right-side page panel and never leaks tags such
-        as </tbody> into the UI.
-        """
+        # Doctor-facing SP3-only Table A result.
+        # This page intentionally shows only the SP3 bottom-cause test.
+        # It does not show SP4, SP5, SP6/Table B, or SP7/SP8 quality checks.
         if not result:
             st.info("Run the SP3 Table A test first.")
             return
@@ -7262,9 +7259,17 @@ elif st.session_state.page == 4:
         checks = taba.get("sp3_bottom_checks") or taba.get("links") or []
 
         if not checks:
-            with st.container(border=True):
-                st.markdown("### Table A — SP3 bottom-cause test")
-                st.info("SP3 needs at least two coded Part I lines. No bottom-cause Table A check is available for this case.")
+            st.markdown(
+                '''
+                <div style="border:1px solid #d8e6dc;border-radius:18px;padding:1.15rem 1.25rem;background:#fff;box-shadow:0 10px 28px rgba(0,0,0,.04);">
+                  <div style="font-size:1.2rem;font-weight:900;color:#10233f;margin-bottom:.35rem;">Table A — SP3 bottom-cause test</div>
+                  <div style="color:#415a4d;line-height:1.55;">
+                    SP3 needs at least two coded Part I lines. No bottom-cause Table A check is available for this case.
+                  </div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
             return
 
         bottom = checks[0]
@@ -7273,96 +7278,118 @@ elif st.session_state.page == 4:
         bottom_code = str(bottom.get("lower_code", "") or "")
 
         any_uncertain = any(x.get("accepted") is None for x in checks)
-        sp3_passed = bool(checks) and all(x.get("accepted") is True for x in checks)
+        sp3_passed = all(x.get("accepted") is True for x in checks)
 
         if sp3_passed:
-            icon = "✅"
+            accent = "#006940"
+            bg = "#ffffff"
+            border = "#d8e6dc"
+            icon = "●"
             decision = "SP3 passed"
             decision_text = "The bottom condition explains every condition above it. Select the bottom line as the tentative UCOD."
-            decision_box = st.success
         elif any_uncertain:
-            icon = "⚠️"
+            accent = "#a66a00"
+            bg = "#fffaf0"
+            border = "#e7c46a"
+            icon = "⚠"
             decision = "SP3 needs review"
             decision_text = "One or more Table A checks could not be confirmed. Review the ICD code or Table A lookup before continuing."
-            decision_box = st.warning
         else:
-            icon = "❌"
+            accent = "#c0392b"
+            bg = "#fff7f7"
+            border = "#e9b3b3"
+            icon = "✕"
             decision = "SP3 failed"
             decision_text = "The bottom condition does not explain all conditions above it. Do not select the bottom line under SP3."
-            decision_box = st.error
 
-        with st.container(border=True):
-            st.markdown(f"### {icon} Table A — SP3 bottom-cause test")
-            st.markdown(
-                f"**Bottom candidate:** Part I ({escape(bottom_line)}) — "
-                f"{escape(bottom_cause)} `{escape(bottom_code)}`"
-            )
-            st.caption("SP3 question: Does the bottom line explain every line above it?")
+        rows = []
+        for i, link in enumerate(checks, start=1):
+            accepted = link.get("accepted")
+            upper_line = str(link.get("upper_line", "") or "")
+            upper_cause = str(link.get("upper_cause", "") or "")
+            upper_code = str(link.get("upper_code", "") or "")
+            lower_line = str(link.get("lower_line", "") or bottom_line)
+            lower_cause = str(link.get("lower_cause", "") or bottom_cause)
+            lower_code = str(link.get("lower_code", "") or bottom_code)
 
-            rows = []
-            detail_rows = []
-            for i, link in enumerate(checks, start=1):
-                accepted = link.get("accepted")
-                upper_line = str(link.get("upper_line", "") or "")
-                upper_cause = str(link.get("upper_cause", "") or "")
-                upper_code = str(link.get("upper_code", "") or "")
-                lower_line = str(link.get("lower_line", "") or bottom_line)
-                lower_cause = str(link.get("lower_cause", "") or bottom_cause)
-                lower_code = str(link.get("lower_code", "") or bottom_code)
-                reason = str(link.get("reason", "") or "")
+            if accepted is True:
+                answer = "Yes"
+                result_text = "Found in Table A"
+                mark = "✅"
+                row_color = "#006940"
+            elif accepted is False:
+                answer = "No"
+                result_text = "Not found in Table A"
+                mark = "✕"
+                row_color = "#c0392b"
+            else:
+                answer = "Unclear"
+                result_text = "Needs review"
+                mark = "⚠"
+                row_color = "#a66a00"
 
-                if accepted is True:
-                    answer = "Yes"
-                    result_text = "✅ Found"
-                elif accepted is False:
-                    answer = "No"
-                    result_text = "❌ Not found"
-                else:
-                    answer = "Unclear"
-                    result_text = "⚠️ Review"
+            compact_question = f"Does line ({lower_line}) explain line ({upper_line})?"
+            cause_line = f"{lower_cause} → {upper_cause}"
+            code_line = f"Address: {upper_code}; Search: {lower_code}"
 
-                rows.append({
-                    "Check": i,
-                    "Table A question": f"Does line ({lower_line}) explain line ({upper_line})?",
-                    "Answer": answer,
-                    "Result": result_text,
-                })
-                detail_rows.append({
-                    "Check": i,
-                    "Effect/address": f"Part I ({upper_line}) — {upper_cause} ({upper_code})",
-                    "Cause searched": f"Part I ({lower_line}) — {lower_cause} ({lower_code})",
-                    "Table reason": reason,
-                })
+            # Compact row design: the table should fit inside the page/right panel.
+            short_result = result_text.replace(" in Table A", "")
+            rows.append(f'''
+              <tr>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:#10233f;text-align:center;vertical-align:top;">{i}</td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;line-height:1.35;vertical-align:top;word-break:break-word;overflow-wrap:anywhere;">
+                  <b>{escape(compact_question)}</b><br>
+                  <span style="color:#293a31;font-size:.82rem;">{escape(cause_line)}</span><br>
+                  <span style="color:#66766b;font-size:.76rem;">{escape(code_line)}</span>
+                </td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};vertical-align:top;word-break:break-word;">{escape(answer)}</td>
+                <td style="padding:.55rem .45rem;border-bottom:1px solid #e5eee9;font-weight:900;color:{row_color};vertical-align:top;word-break:break-word;">{mark} {escape(short_result)}</td>
+              </tr>
+            ''')
 
-            table_df = pd.DataFrame(rows)
-            st.dataframe(
-                table_df,
-                hide_index=True,
-                use_container_width=True,
-                height=min(245, 70 + 58 * len(table_df)),
-                column_config={
-                    "Check": st.column_config.NumberColumn(width="small"),
-                    "Table A question": st.column_config.TextColumn(width="large"),
-                    "Answer": st.column_config.TextColumn(width="small"),
-                    "Result": st.column_config.TextColumn(width="medium"),
-                },
-            )
+        rows_html = "".join(rows)
 
-            with st.expander("Show Table A lookup details"):
-                st.dataframe(
-                    pd.DataFrame(detail_rows),
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Check": st.column_config.NumberColumn(width="small"),
-                        "Effect/address": st.column_config.TextColumn(width="large"),
-                        "Cause searched": st.column_config.TextColumn(width="large"),
-                        "Table reason": st.column_config.TextColumn(width="large"),
-                    },
-                )
+        st.markdown(
+            f'''
+            <div style="border:1px solid {border};border-radius:18px;padding:1rem 1rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);max-width:100%;overflow:hidden;">
+              <div style="font-size:1.15rem;font-weight:900;color:#10233f;margin-bottom:.35rem;">
+                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Table A — SP3 bottom-cause test
+              </div>
+              <div style="border-left:4px solid {accent};background:#fff;border-radius:12px;padding:.75rem .85rem;line-height:1.55;margin:.75rem 0 1rem;">
+                <div><b>Bottom candidate:</b> Part I ({escape(bottom_line)}) — {escape(bottom_cause)} <b>{escape(bottom_code)}</b></div>
+                <div><b>SP3 question:</b> Does the bottom line explain every line above it?</div>
+              </div>
 
-            decision_box(f"**{decision}.** {decision_text}")
+              <div style="width:100%;overflow:hidden;">
+              <table style="width:100%;max-width:100%;table-layout:fixed;border-collapse:collapse;background:#fff;border:1px solid #e5eee9;border-radius:12px;overflow:hidden;font-size:.80rem;">
+                <colgroup>
+                  <col style="width:12%;">
+                  <col style="width:48%;">
+                  <col style="width:18%;">
+                  <col style="width:22%;">
+                </colgroup>
+                <thead>
+                  <tr style="background:#f7faf8;color:#10233f;text-align:left;">
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;text-align:center;">Check</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Table A question</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Answer</th>
+                    <th style="padding:.52rem .45rem;border-bottom:1px solid #e5eee9;">Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows_html}
+                </tbody>
+              </table>
+              </div>
 
+              <div style="margin-top:1rem;border-top:1px solid #e5eee9;padding-top:.9rem;line-height:1.55;">
+                <div style="font-size:1.05rem;font-weight:900;color:{accent};">{escape(decision)}</div>
+                <div style="color:#26352c;">{escape(decision_text)}</div>
+              </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
     def _render_quality_result_simple(result: Dict, icd_results: Dict) -> bool:
         """Show SP7/SP8 doctor-facing quality decision. Returns True if final certificate should be blocked."""
         if not result:
@@ -7576,8 +7603,8 @@ elif st.session_state.page == 4:
                     st.rerun()
             with btn_run:
                 can_run_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
-                if st.button("Run SP3 Test", type="primary", disabled=not can_run_rules, use_container_width=True, key="run_table_ab_right_panel"):
-                    with st.spinner("Checking SP3 Table A links..."):
+                if st.button("Check Sequence", type="primary", disabled=not can_run_rules, use_container_width=True, key="run_table_ab_right_panel"):
+                    with st.spinner("Checking sequence..."):
                         tabb_df = load_tabb_rules()
                         taba_df = load_taba_rules()
                         st.session_state.agent3_result = agent3_mortality_sequence_with_llm(
