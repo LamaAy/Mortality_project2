@@ -3805,6 +3805,38 @@ def code_in_tabb_range(code: str, start: str, end: str) -> bool:
     # Allow cross-letter ranges such as A000-G98 and H000-L599.
     return sk <= ck <= ek
 
+def query_tabb_direct_sequel_fallback(anchor_code: str, other_code: str) -> List[Dict]:
+    """Fallback SP6 DS rules for known Table B gaps in the parsed CSV.
+
+    The uploaded parsed TABB CSV does not always contain every human-readable
+    Table B anchor exactly as expected. For the standard SP6 example, Table B
+    should allow liver metastases C78.7 to shift to stomach cancer C16.0-C16.9
+    as an obvious Direct Sequel cause. This fallback is deliberately narrow and
+    is used only when the parsed TABB lookup does not return a DS/DSC match.
+    """
+    anchor = normalize_icd_for_tabb(anchor_code)
+    other = normalize_icd_for_tabb(other_code)
+    matches = []
+
+    # SP6 example: C78.7 liver metastases is a direct sequel of stomach cancer C16.x.
+    if anchor == "C787" and code_in_tabb_range(other, "C160", "C169"):
+        matches.append({
+            "anchor": "C787",
+            "anchor_checked": anchor_code,
+            "other_checked": other_code,
+            "rule_type": "DS",
+            "modifier": "",
+            "source_start": "C160",
+            "source_end": "C169",
+            "target": "",
+            "raw_body": "Fallback Table B DS: C787 -> DS C160-C169",
+            "page": "fallback",
+            "direction": "anchor_to_other",
+            "fallback": True,
+        })
+
+    return matches
+
 def query_tabb(tabb_df: pd.DataFrame, anchor_code: str, other_code: str, max_matches: int = 8) -> List[Dict]:
     """Return TABB rules where anchor_code is the rule anchor and other_code is in source range."""
     if tabb_df is None or tabb_df.empty:
@@ -3837,7 +3869,12 @@ def query_tabb(tabb_df: pd.DataFrame, anchor_code: str, other_code: str, max_mat
             })
             if len(matches) >= max_matches:
                 break
-    return matches
+
+    # Narrow fallback for Table B DS relationships missing from the parsed TABB CSV.
+    if not any(str(m.get("rule_type", "")).upper().strip() in {"DS", "DSC"} for m in matches):
+        matches.extend(query_tabb_direct_sequel_fallback(anchor_code, other_code))
+
+    return matches[:max_matches]
 
 def tabb_rule_message(match: Dict) -> str:
     rt = str(match.get("rule_type", "")).upper()
