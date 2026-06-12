@@ -832,6 +832,11 @@ LAY_QUERY_EXPANSIONS = {
     "brain bleed": ["intracranial hemorrhage", "cerebral hemorrhage"],
     "blood clot in lung": ["pulmonary embolism"],
     "cancer spread": ["metastatic malignant neoplasm", "secondary malignant neoplasm"],
+    "liver metastases": ["secondary malignant neoplasm of liver", "metastatic malignant neoplasm of liver", "liver secondary cancer"],
+    "liver metastasis": ["secondary malignant neoplasm of liver", "metastatic malignant neoplasm of liver", "liver secondary cancer"],
+    "metastatic liver cancer": ["secondary malignant neoplasm of liver", "metastatic malignant neoplasm of liver"],
+    "stomach cancer": ["malignant neoplasm of stomach", "gastric cancer", "malignant neoplasm of stomach unspecified"],
+    "gastric cancer": ["malignant neoplasm of stomach", "stomach cancer", "malignant neoplasm of stomach unspecified"],
     "ards": ["acute respiratory distress syndrome"],
     "acute respiratory distress syndrome": ["ards"],
     "peritonitis": ["generalized peritonitis"],
@@ -1213,6 +1218,32 @@ def candidate_adjustment_score(row: pd.Series, query: str, sex_value: str, role:
         if q.strip() == "migraine" and code_norm.startswith("G430"):
             score -= 2.0
             reasons.append("specific migraine subtype penalized because doctor did not specify subtype")
+
+    if any(t in q for t in ["liver metastases", "liver metastasis", "metastatic liver", "metastases to liver", "secondary malignant neoplasm of liver"]):
+        # Liver metastases should map to secondary malignant neoplasm of liver, C78.7.
+        # Avoid infectious/syphilitic liver terms or nonspecific metastatic phrases when the doctor clearly wrote liver metastases.
+        if code_norm.startswith("C787") or code == "C78.7":
+            score += 14.0
+            reasons.append("preferred liver metastases code C78.7")
+        elif code_norm.startswith("C78"):
+            score += 4.0
+            reasons.append("preferred secondary malignant neoplasm family C78")
+        if code_norm.startswith(("A52", "B", "K", "S", "T")):
+            score -= 8.0
+            reasons.append("non-neoplasm liver/metastasis code penalized")
+
+    if any(t in q for t in ["stomach cancer", "gastric cancer", "malignant neoplasm of stomach"]):
+        # Stomach/gastric cancer should map to malignant neoplasm of stomach C16,
+        # not abdominal injury S36 or other chapter codes.
+        if code_norm.startswith("C16"):
+            score += 14.0
+            reasons.append("preferred stomach cancer family C16")
+        if code_norm.startswith("C169") or code == "C16.9":
+            score += 4.0
+            reasons.append("preferred unspecified stomach cancer C16.9")
+        if code_norm.startswith(("S", "T", "K", "D13", "D37")):
+            score -= 8.0
+            reasons.append("non-malignant/injury stomach code penalized")
 
     if "acute respiratory distress syndrome" in q or re.fullmatch(r"ards", q):
         if code.startswith("J80"):
@@ -6353,6 +6384,12 @@ def _preferred_icd10_candidates_for_query(query: str, df_source: pd.DataFrame, r
         if not any(t in q for t in site_terms) or "unspecified" in q or "generalized" in q or "generalised" in q:
             picks.append(("I70.9", "Generalized and unspecified atherosclerosis"))
 
+    if any(t in q for t in ["liver metastases", "liver metastasis", "metastatic liver", "metastases to liver", "secondary malignant neoplasm of liver"]):
+        picks.append(("C78.7", "Secondary malignant neoplasm of liver"))
+
+    if any(t in q for t in ["stomach cancer", "gastric cancer", "malignant neoplasm of stomach"]):
+        picks.append(("C16.9", "Malignant neoplasm of stomach, unspecified"))
+
     if q.strip() == "migraine" or q.endswith(" migraine") or q.startswith("migraine "):
         picks.append(("G43.9", "Migraine, unspecified"))
 
@@ -6381,6 +6418,49 @@ def _preferred_icd10_candidates_for_query(query: str, df_source: pd.DataFrame, r
             "retrieval_source": "Preferred ICD candidate from query normalization",
             "score": 100.0,
         })
+    return out
+
+
+def _force_preferred_candidates_to_top(query: str, candidates: List[Dict], df_source: pd.DataFrame, release_id: str = "2019") -> List[Dict]:
+    """
+    Final safety layer for doctor-facing ICD choices.
+    If the cause text has a deterministic preferred ICD mapping, make that code
+    the current recommendation even when WHO/browser/local retrieval ranked an
+    unrelated candidate first.
+
+    Example fixes:
+      stomach cancer -> C16.9, not S36.3
+      liver metastases -> C78.7, not A52.7
+    """
+    preferred = _preferred_icd10_candidates_for_query(query, df_source, release_id=release_id)
+    if not preferred:
+        return candidates or []
+
+    out: List[Dict] = []
+    seen = set()
+
+    def add(c: Dict):
+        code = str(c.get("code_formatted", c.get("code", "")) or "").strip().upper()
+        if not code:
+            return
+        norm = code_norm_for_rules(code)
+        if not norm or norm in seen:
+            return
+        x = _enrich_who_candidate_with_local_flags(c, df_source, query)
+        x["score"] = max(float(x.get("score", 0.0) or 0.0), 1000.0)
+        x["source"] = x.get("source") or "Preferred ICD candidate from query normalization"
+        x["retrieval_source"] = x.get("retrieval_source") or x["source"]
+        out.append(x)
+        seen.add(norm)
+
+    # Preferred mappings first, in deterministic order.
+    for c in preferred:
+        add(c)
+
+    # Then keep all other candidates for doctor choice.
+    for c in candidates or []:
+        add(c)
+
     return out
 
 
@@ -6534,6 +6614,11 @@ def retrieve_icd10_candidates_who_first(
         unique.append(c)
         seen.add(norm)
     unique.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+
+    # Absolute final guardrail: deterministic disease-name mappings must be the
+    # doctor-facing recommendation, not merely one candidate in a long list.
+    unique = _force_preferred_candidates_to_top(q, unique, df_source, release_id=release_id)
+
     audit["final_candidate_count"] = len(unique)
     audit["final_sources"] = sorted(set(str(x.get("source", "")) for x in unique if x.get("source")))
     return unique[:top_k], audit
@@ -6669,6 +6754,9 @@ def code_extracted_causes_with_claude(
         )
         retrieval_audit.append({"line": line, "cause": cause, "audit": audit})
         if cands:
+            # Last-mile guardrail before selecting the default recommendation.
+            # This prevents wrong WHO/tree/local rankings such as stomach cancer -> S36.3.
+            cands = _force_preferred_candidates_to_top(cause, cands, df_source, release_id="2019")
             chosen = _selected_candidate_to_coded_item(cands[0], cause, line, role, interval, label, df_source)
             chosen["candidates"] = cands
             chosen["who_api"] = verify_code_with_who_api(chosen.get("code_formatted", ""), release_id="2019")
