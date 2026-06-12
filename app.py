@@ -2820,9 +2820,11 @@ defaults = {
     "agent1_result": None,
     "agent2_result": None,
     "agent3_result": None,
+    "agent4_result": None,
     "agent1_done": False,
     "agent2_done": False,
     "agent3_done": False,
+    "agent4_done": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -3745,7 +3747,14 @@ def icd_sort_key_for_tabb(code: str) -> Tuple[str, int, str]:
     return (letter, category, suffix)
 
 def code_in_tabb_range(code: str, start: str, end: str) -> bool:
-    """Check if normalized ICD code is inside a TABB code/range."""
+    """Check if normalized ICD code is inside a TABA/TABB code/range.
+
+    Important: Table A ranges can cross ICD letters, e.g. H000-L599. The old
+    implementation incorrectly required the start, code, and end to have the
+    same first letter, so I21.9 was not found inside H000-L599. This made
+    Acute MI -> Heart failure fail incorrectly. The comparison below allows
+    cross-letter ranges by comparing the full ICD sort keys.
+    """
     c = normalize_icd_for_tabb(code)
     s = normalize_icd_for_tabb(start)
     e = normalize_icd_for_tabb(end) or s
@@ -3761,10 +3770,8 @@ def code_in_tabb_range(code: str, start: str, end: str) -> bool:
     sk = icd_sort_key_for_tabb(s)
     ck = icd_sort_key_for_tabb(c)
     ek = icd_sort_key_for_tabb(e)
-    if sk[0] != ck[0] or ek[0] != ck[0]:
-        return False
 
-    # For category range checks, tuple comparison is sufficient after normalization.
+    # Allow cross-letter ranges such as A000-G98 and H000-L599.
     return sk <= ck <= ek
 
 def query_tabb(tabb_df: pd.DataFrame, anchor_code: str, other_code: str, max_matches: int = 8) -> List[Dict]:
@@ -4908,6 +4915,8 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
         st.session_state.agent2_done = True
         st.session_state.agent3_done = False
         st.session_state.agent3_result = None
+        st.session_state.agent4_done = False
+        st.session_state.agent4_result = None
         st.success("Doctor ICD choices were applied. Please run the Table A/B Rule Trace again.")
         st.rerun()
 
@@ -5680,10 +5689,15 @@ def apply_sp_engine(api_key: str, concepts: Dict, coded_causes: List[Dict]) -> D
 
 
 def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_df: pd.DataFrame, taba_df: Optional[pd.DataFrame] = None) -> Dict:
-    """Compact rule-trace step. Deterministic rule output is authoritative; LLM may only explain if available."""
+    """Table A sequence step.
+
+    This page intentionally runs only SP1-SP5. It should not run SP6/Table B or
+    SP7/SP8 quality checks, because the doctor-facing button is "Check Sequence"
+    and the output should explain only the Table A sequence decision:
+    SP3 -> SP4 -> SP5.
+    """
     coded_causes = coded_results.get("coded_causes", []) or []
     validation = coded_results.get("validation", {}) or {}
-    sp_review = apply_sp_engine(api_key, coded_results.get("concepts", {}) or {}, coded_causes)
 
     part1_items_for_taba = [x for x in coded_causes if x.get("role") in {"immediate", "contributing", "underlying"}]
 
@@ -5695,20 +5709,24 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     else:
         active_taba_df = taba_df
 
-    if tabb_df is None or getattr(tabb_df, "empty", True):
-        active_tabb_df = load_tabb_rules()
-    else:
-        active_tabb_df = tabb_df
-
+    # Authoritative result for this page: SP1-SP5 only.
+    sp_review = apply_sp1_to_sp5_with_taba(coded_causes, active_taba_df)
     taba_sequence = sp_review.get("taba_sequence") or check_part1_sequence_with_taba(part1_items_for_taba, active_taba_df)
-    tabb_result = run_tabb_certificate_check(active_tabb_df, coded_causes, sp_review, validation)
 
-    # Sequence status based on deterministic result. SP7 hard ill-defined causes block submission.
+    # Table B/SP6 is deliberately not run in this Sequence Check page.
+    tabb_result = {
+        "available": False,
+        "summary": "Table B/SP6 is not run on the Check Sequence page.",
+        "matches": [],
+    }
+
+    # Sequence status based on deterministic SP1-SP5 result only.
     if sp_review.get("blocking"):
         status = "block"
-    elif sp_review.get("needs_manual_review") is False and sp_review.get("sp_rule") in {"SP1", "SP2", "SP3"}:
+    elif sp_review.get("sp_rule") == "SP3" and sp_review.get("needs_manual_review") is False:
         status = "pass"
     else:
+        # SP4/SP5 are valid sequence outcomes but should remain review-suggested.
         status = "warning"
     selected = sp_review.get("selected_cause", "")
     code = sp_review.get("selected_code", "")
@@ -5746,6 +5764,173 @@ def agent3_mortality_sequence_with_llm(api_key: str, coded_results: Dict, tabb_d
     coded_results["validation"] = validation
     return result
 
+
+# =============================================================================
+# SP6 — Table B obvious-cause check, separate from Table A sequence check
+# =============================================================================
+def _coded_condition_label(item: Dict) -> str:
+    """Compact doctor-facing label for a coded certificate condition."""
+    if not item:
+        return ""
+    line = str(item.get("line", "") or "").strip()
+    cause = str(item.get("cause", "") or "").strip()
+    code = str(item.get("code_formatted", "") or item.get("doctor_selected_code", "") or "").strip()
+    prefix = f"Part I ({line})" if line in {"a", "b", "c", "d"} else (line or "Part II")
+    return f"{prefix} — {cause} ({code})" if code else f"{prefix} — {cause}"
+
+
+def _find_condition_by_code_or_line(coded_causes: List[Dict], code: str = "", line: str = "", cause: str = "") -> Optional[Dict]:
+    code_n = code_norm_for_rules(code)
+    line_l = str(line or "").lower().strip()
+    cause_k = normalize_cause_key(cause)
+    for item in coded_causes or []:
+        if line_l and str(item.get("line", "") or "").lower().strip() == line_l:
+            return item
+    for item in coded_causes or []:
+        if code_n and code_norm_for_rules(item.get("code_formatted", "")) == code_n:
+            return item
+    for item in coded_causes or []:
+        if cause_k and normalize_cause_key(item.get("cause", "")) == cause_k:
+            return item
+    return None
+
+
+def run_sp6_direct_sequel_loop(sp_review: Dict, coded_causes: List[Dict], tabb_df: pd.DataFrame) -> Dict:
+    """Run SP6 as a visible Table B loop.
+
+    Current TSP is the Table B address. All other certificate conditions are searched
+    as possible DS/DSC obvious causes. If one is found, the TSP shifts and the loop
+    repeats until no further DS cause is found.
+    """
+    original = dict(sp_review or {})
+    out = dict(sp_review or {})
+    out.setdefault("warnings", [])
+    out.setdefault("base_sp_rule", out.get("sp_rule", "REVIEW"))
+    out.setdefault("rule_path", [out.get("base_sp_rule", out.get("sp_rule", "REVIEW"))])
+
+    current_item = _find_condition_by_code_or_line(
+        coded_causes,
+        code=out.get("selected_code", ""),
+        line=out.get("selected_line", ""),
+        cause=out.get("selected_cause", ""),
+    )
+    if current_item is None:
+        out["sp6_trace_all"] = []
+        out["sp6_changed"] = False
+        out["sp6_summary"] = "No starting point was available for Table B checking."
+        return {"before": original, "after": out, "changed": False, "trace": [], "summary": out["sp6_summary"], "blocking": False}
+
+    trace = []
+    changed = False
+    seen_tsp_codes = set()
+
+    for loop_idx in range(1, 6):
+        current_code = str(current_item.get("code_formatted", "") or current_item.get("doctor_selected_code", "") or "")
+        current_norm = code_norm_for_rules(current_code)
+        if not current_norm or current_norm in seen_tsp_codes:
+            break
+        seen_tsp_codes.add(current_norm)
+
+        found_item = None
+        for other in coded_causes or []:
+            other_code = str(other.get("code_formatted", "") or other.get("doctor_selected_code", "") or "")
+            other_norm = code_norm_for_rules(other_code)
+            if not other_norm or other_norm == current_norm:
+                continue
+
+            matches = query_tabb(tabb_df, current_code, other_code, max_matches=10)
+            ds_matches = [m for m in matches if str(m.get("rule_type", "")).upper().strip() in {"DS", "DSC"}]
+            ds_found = bool(ds_matches)
+            action = "Ignore"
+            if ds_found:
+                action = f"Change TSP to {_coded_condition_label(other)}"
+
+            trace.append({
+                "loop": loop_idx,
+                "address_code": current_code,
+                "address_cause": str(current_item.get("cause", "") or ""),
+                "address_line": str(current_item.get("line", "") or ""),
+                "address_label": _coded_condition_label(current_item),
+                "search_code": other_code,
+                "search_cause": str(other.get("cause", "") or ""),
+                "search_line": str(other.get("line", "") or ""),
+                "search_label": _coded_condition_label(other),
+                "ds_found": ds_found,
+                "rule_type": str(ds_matches[0].get("rule_type", "DS") if ds_matches else ""),
+                "source_range": f"{ds_matches[0].get('source_start','')}–{ds_matches[0].get('source_end','')}" if ds_matches else "",
+                "table_b_output": "DS found" if ds_found else "Not listed as DS",
+                "action": action,
+                "matches": ds_matches[:3],
+            })
+
+            if ds_found:
+                found_item = other
+                break
+
+        if found_item is None:
+            break
+        current_item = found_item
+        changed = True
+
+    final_code = str(current_item.get("code_formatted", "") or current_item.get("doctor_selected_code", "") or "")
+    final_line = str(current_item.get("line", "") or "")
+    final_cause = str(current_item.get("cause", "") or "")
+
+    out["sp6_trace_all"] = trace
+    out["sp6_changed"] = changed
+    out["selected_code"] = final_code
+    out["selected_line"] = final_line
+    out["selected_cause"] = final_cause
+
+    if changed:
+        if "SP6" not in out["rule_path"]:
+            out["rule_path"].append("SP6")
+        out["sp_rule"] = "SP6"
+        out["needs_manual_review"] = True
+        msg = "SP6 applied: Table B found an obvious Direct Sequel cause elsewhere on the certificate and shifted the tentative starting point."
+        if msg not in out["warnings"]:
+            out["warnings"].append(msg)
+        out["explanation"] = msg
+        out["sp6_summary"] = f"Obvious cause found. New starting point: {_coded_condition_label(current_item)}."
+    else:
+        out["sp6_summary"] = f"No obvious Direct Sequel cause found. Keep current starting point: {_coded_condition_label(current_item)}."
+
+    return {"before": original, "after": out, "changed": changed, "trace": trace, "summary": out.get("sp6_summary", "SP6 completed."), "blocking": False}
+
+
+def agent4_obvious_cause_with_tabb(coded_results: Dict, tabb_df: Optional[pd.DataFrame] = None) -> Dict:
+    """Doctor-facing SP6 step. Uses Table B only; does not run SP7/SP8 quality checks."""
+    coded_causes = (coded_results or {}).get("coded_causes", []) or []
+    validation = dict((coded_results or {}).get("validation", {}) or {})
+    sp_review = dict(validation.get("sp_review", {}) or {})
+
+    if not sp_review:
+        taba_df = load_taba_rules()
+        sp_review = apply_sp1_to_sp5_with_taba(coded_causes, taba_df)
+
+    active_tabb_df = tabb_df if tabb_df is not None and not getattr(tabb_df, "empty", True) else load_tabb_rules()
+    sp6 = run_sp6_direct_sequel_loop(sp_review, coded_causes, active_tabb_df)
+    final_sp = sp6.get("after", sp_review)
+
+    validation["tabb_result"] = {
+        "available": bool(active_tabb_df is not None and not getattr(active_tabb_df, "empty", True)),
+        "summary": sp6.get("summary", "SP6 completed."),
+        "sp6_trace_all": sp6.get("trace", []),
+        "changed": bool(sp6.get("changed")),
+    }
+    validation = apply_sp_result_to_validation(validation, final_sp, coded_causes)
+    coded_results["validation"] = validation
+
+    return {
+        "status": "warning" if sp6.get("changed") else "pass",
+        "summary": sp6.get("summary", "SP6 completed."),
+        "blocking": False,
+        "sp_review_before": sp6.get("before", sp_review),
+        "sp_review": final_sp,
+        "sp6_trace_all": sp6.get("trace", []),
+        "sp6_changed": bool(sp6.get("changed")),
+        "validation": validation,
+    }
 
 
 # =============================================================================
@@ -6841,6 +7026,8 @@ def render_doctor_icd_choice_editor(coded_results: Optional[Dict], df_source: pd
         st.session_state.agent2_done = True
         st.session_state.agent3_done = False
         st.session_state.agent3_result = None
+        st.session_state.agent4_done = False
+        st.session_state.agent4_result = None
         st.success("ICD choices were applied. Continue to Table A/B Rule Trace.")
         st.rerun()
 
@@ -7556,6 +7743,68 @@ elif st.session_state.page == 4:
                 st.error(f"SP5 result: no acceptable causal run reaches line (a). Review candidate: Part I ({selected_line}) — {selected_cause} ({selected_code}).")
             else:
                 st.warning("Sequence review completed, but the rule selection needs coder review.")
+    def _render_sp6_result_simple(result: Dict) -> None:
+        """Doctor-facing SP6 Table B result."""
+        if not result:
+            st.info("Click Check Obvious Cause first.")
+            return
+        before = result.get("sp_review_before", {}) or {}
+        after = result.get("sp_review", {}) or {}
+        trace = result.get("sp6_trace_all", []) or []
+        changed = bool(result.get("sp6_changed"))
+
+        before_label = f"Part I ({before.get('selected_line','')}) — {before.get('selected_cause','')} ({before.get('selected_code','')})"
+        after_prefix = "Part I" if str(after.get("selected_line", "")) in {"a", "b", "c", "d"} else "Part II"
+        after_line = str(after.get("selected_line", "") or "")
+        after_label = f"{after_prefix} ({after_line}) — {after.get('selected_cause','')} ({after.get('selected_code','')})"
+
+        if changed:
+            accent = "#a66a00"; bg = "#fffaf0"; border = "#e7c46a"; icon = "⚠"; status = "Obvious cause found"
+            why = "Table B found a Direct Sequel cause elsewhere on the certificate, so the starting point was shifted."
+        else:
+            accent = "#006940"; bg = "#ffffff"; border = "#d8e6dc"; icon = "●"; status = "No change"
+            why = "Table B did not find another certificate condition listed as a Direct Sequel cause of the current starting point."
+
+        st.markdown(
+            f"""
+            <div style="border:1px solid {border};border-radius:18px;padding:1rem 1rem;background:{bg};box-shadow:0 10px 28px rgba(0,0,0,.04);max-width:100%;overflow:hidden;margin-bottom:1rem;">
+              <div style="font-size:1.15rem;font-weight:900;color:#10233f;margin-bottom:.35rem;">
+                <span style="color:{accent};font-weight:900;margin-right:.35rem;">{icon}</span> Table B obvious-cause check
+              </div>
+              <div style="display:grid;grid-template-columns:1fr;gap:.45rem;line-height:1.55;">
+                <div><b>Status:</b> <span style="color:{accent};font-weight:900;">{escape(status)}</span></div>
+                <div><b>Starting point before Table B:</b> {escape(before_label)}</div>
+                <div><b>Starting point after Table B:</b> {escape(after_label)}</div>
+                <div style="border-left:4px solid {accent};background:#fff;border-radius:12px;padding:.65rem .75rem;margin-top:.25rem;">
+                  <b>Why:</b> {escape(why)}
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        rows = []
+        for i, t in enumerate(trace, start=1):
+            rows.append({
+                "Step": t.get("loop", i),
+                "Table B address": f"{t.get('address_cause','')} ({t.get('address_code','')})",
+                "Condition searched": f"{t.get('search_cause','')} ({t.get('search_code','')})",
+                "DS found?": "Yes" if t.get("ds_found") else "No",
+                "Action": t.get("action", "Ignore"),
+            })
+
+        if rows:
+            st.markdown("**Table B checks**")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Table B checks were available. Confirm that the TABB file is loaded and the sequence step selected a starting point.")
+
+        if changed:
+            st.warning("SP6 changed the tentative starting point. Coder review is recommended before final certification.")
+        else:
+            st.success("SP6 did not change the tentative starting point.")
+
     def _render_quality_result_simple(result: Dict, icd_results: Dict) -> bool:
         """Show SP7/SP8 doctor-facing quality decision. Returns True if final certificate should be blocked."""
         if not result:
@@ -7731,6 +7980,8 @@ elif st.session_state.page == 4:
                     st.session_state.agent2_done = True
                     st.session_state.agent3_done = False
                     st.session_state.agent3_result = None
+                    st.session_state.agent4_done = False
+                    st.session_state.agent4_result = None
                     st.rerun()
             with btn_next:
                 can_continue_rules = bool(st.session_state.get("agent2_done")) and bool(st.session_state.get("icd_results")) and not bool((st.session_state.get("agent2_result") or {}).get("blocking"))
@@ -7784,19 +8035,66 @@ elif st.session_state.page == 4:
                             st.session_state.icd_results.get("validation", {}),
                         )
                     st.session_state.agent3_done = True
+                    st.session_state.agent4_done = False
+                    st.session_state.agent4_result = None
                     st.rerun()
             with btn_next:
                 current_rule_result = st.session_state.get("agent3_result") or {}
                 blocked_final = bool(current_rule_result.get("blocking") or ((current_rule_result.get("sp_review") or {}).get("blocking")))
                 # SP3, SP4, and SP5 are all valid sequence outcomes for this step.
                 # Do not block Next only because SP3 failed; SP4/SP5 may still select a review candidate.
-                if st.button("Next", disabled=(not bool(st.session_state.get("agent3_done")) or blocked_final), use_container_width=True, key="next_final_right_panel"):
-                    st.session_state.page = 5
+                if st.button("Next", disabled=(not bool(st.session_state.get("agent3_done")) or blocked_final), use_container_width=True, key="next_sp6_right_panel"):
+                    st.session_state.review_stage = "sp6"
                     st.rerun()
 
             if st.session_state.get("agent3_result"):
                 st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
                 _render_rules_result_simple(st.session_state.get("agent3_result"))
+
+
+    # -------------------------------------------------------------------------
+    # Stage 4: Table B obvious-cause check (SP6)
+    # -------------------------------------------------------------------------
+    elif stage == "sp6":
+        left_col, right_col = st.columns([1.10, 1.30], gap="large")
+
+        with left_col:
+            part1_chain, part2_conditions = render_doctor_edit_panel(fd)
+            save_agent_cod_to_form_data(fd, part1_chain, part2_conditions)
+
+        with right_col:
+            st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+            btn_back, btn_run, btn_next = st.columns(3, gap="small")
+            with btn_back:
+                if st.button("Back", use_container_width=True, key="sp6_back_to_sequence_right"):
+                    st.session_state.review_stage = "rules"
+                    st.rerun()
+            with btn_run:
+                can_run_sp6 = bool(st.session_state.get("agent3_done")) and bool(st.session_state.get("icd_results"))
+                if st.button("Check Obvious Cause", type="primary", disabled=not can_run_sp6, use_container_width=True, key="run_sp6_right_panel"):
+                    with st.spinner("Checking Table B for an obvious cause..."):
+                        tabb_df = load_tabb_rules()
+                        st.session_state.agent4_result = agent4_obvious_cause_with_tabb(
+                            st.session_state.icd_results,
+                            tabb_df,
+                        )
+                        st.session_state.icd_results["validation"] = st.session_state.agent4_result.get(
+                            "validation",
+                            st.session_state.icd_results.get("validation", {}),
+                        )
+                    st.session_state.agent4_done = True
+                    st.rerun()
+            with btn_next:
+                current_sp6_result = st.session_state.get("agent4_result") or {}
+                blocked_final = bool(current_sp6_result.get("blocking") or ((current_sp6_result.get("sp_review") or {}).get("blocking")))
+                if st.button("Next", disabled=(not bool(st.session_state.get("agent4_done")) or blocked_final), use_container_width=True, key="next_final_from_sp6_right_panel"):
+                    st.session_state.page = 5
+                    st.rerun()
+
+            if st.session_state.get("agent4_result"):
+                st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+                _render_sp6_result_simple(st.session_state.get("agent4_result"))
+
 
 
 # =============================================================================
